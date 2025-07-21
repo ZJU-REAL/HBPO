@@ -7,7 +7,7 @@
 <p align="center"><em></em></p>
 
 <div align="center">
-  <img src="./figures/overview.png" alt="overview" style="width: 66%; height: auto;">
+  <img src="./figures/overview.png" alt="overview" style="width: 85%; height: auto;">
 </div>
 
 
