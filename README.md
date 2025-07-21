@@ -11,5 +11,5 @@
 </div>
 
 
-[![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](http://arxiv.org/abs/2504.14945) [![alphaXiv](https://img.shields.io/badge/discussion-A42C25?style=for-the-badge&logo=arxiv&logoColor=white&color=blue
+[![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](http://arxiv.org/abs/#) [![alphaXiv](https://img.shields.io/badge/discussion-A42C25?style=for-the-badge&logo=arxiv&logoColor=white&color=blue
 )](https://www.alphaxiv.org/abs/#) [![Github](https://img.shields.io/badge/HBPO-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/zju-real/HBPO)
