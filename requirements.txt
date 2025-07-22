@@ -20,7 +20,7 @@ ray[default]
 scipy
 scikit-learn
 sentence-transformers
-tensordict<=0.6.2
+tensordict<=0.9.1
 torchdata
 transformers
 # vllm==0.6.3.post1
