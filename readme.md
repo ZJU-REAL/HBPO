@@ -65,9 +65,7 @@ skythought evaluate \
   --result-dir ./
 ```
 
-## Citation
 
-```
 
-```
+
 
