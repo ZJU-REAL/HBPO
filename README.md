@@ -23,7 +23,7 @@ Current efficient reasoning approaches face two critical limitations:
 
 ## Method Overview
 
-![Method](figures/method.pdf)
+![Method](figures/method.png)
 
 HBPO introduces a hierarchical training framework with three core components:
 
