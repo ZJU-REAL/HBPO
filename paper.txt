@@ -1,0 +1,1230 @@
+Large reasoning models achieve remarkable performance through extensive chain-of-thought generation, yet exhibit significant computational inefficiency by applying uniform reasoning strategies regardless of problem complexity. We present Hierarchical Budget Policy Optimization (\methodname), a reinforcement learning framework that enables models to learn problem-specific reasoning depths without sacrificing capability. \methodname addresses the fundamental challenge of exploration space collapse in efficiency-oriented training, where penalties on long output length systematically bias models away from necessary long reasoning paths. Through hierarchical budget exploration, our approach partitions rollout samples into multiple subgroups with distinct token budgets, aiming to enable efficient resource allocation while preventing degradation of capability. We introduce differentiated reward mechanisms that create budget-aware incentives aligned with the complexity of the problem, allowing models to discover natural correspondences between task requirements and computational effort. Extensive experiments demonstrate that \methodname reduces average token usage by up to 60.6\% while improving accuracy by 3.14\% across four reasoning benchmarks. Unlike existing methods that impose external constraints or rely on discrete mode selection, \methodname exhibits emergent adaptive behavior where models automatically adjust reasoning depth based on problem complexity. Our results suggest that reasoning efficiency and capability are not inherently conflicting, and can be simultaneously optimized through appropriately structured hierarchical training that preserves exploration diversity.
+
+
+%研究问题：现有方法缺乏对于问题复杂度和计算损失的平衡能力。
+Advances in large reasoning models have led to impressive performance on complex reasoning tasks through chain-of-thought methodologies~\citep{LearningReasonLLMs,guoDeepseekr1IncentivizingReasoning2025}. However, these models exhibit fundamental inefficiency: they generate unnecessarily long reasoning chains even for simple problems, sometimes consuming thousands of tokens for basic arithmetic~\citep{chenReasoningEraSurvey2025,chenNOTThinkThat2025}. This phenomenon reveals a fundamental misalignment, as current reasoning models lack the ability to adapt their computational effort to the actual complexity of problems.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{figures/intro.pdf}
+  \caption{HBPO prevents exploration space collapse through hierarchical budget exploration. While efficient reasoning methods progressively abandon long reasoning paths during training, and length control methods like L1 achieve efficiency through mechanical constraints, HBPO partitions the exploration space into budget-constrained hierarchies (512, 1024, 2048, 2560 tokens). This structure maintains reasoning diversity throughout training, enabling emergent adaptive behavior where models match computational resources to problem complexity. The result is superior accuracy with efficient token usage varying from hundreds of tokens on GSM8K to thousands on AIME25.}
+  \label{fig:1}
+\end{figure}
+
+% 研究问题的实证证据
+Recent empirical findings challenge the conventional belief that longer reasoning always leads to better outcomes. Research shows that models can maintain competitive accuracy even without intermediate steps~\citep{maReasoningModelsCan2025}, and in some cases, shorter reasoning paths perform comparably or even better on simpler tasks~\citep{liSelfBudgeterAdaptiveToken2025}. This is further supported by stark variations in optimal reasoning lengths across tasks. For instance, L1~\citep{aggarwalL1ControllingHow2025} achieves peak performance with ~1,100 tokens on GSM8K, but requires over 3,000 tokens on OlympiadBench. Such heterogeneity highlights a key insight: the computational requirements for effective reasoning are inherently problem-dependent, yet current models apply uniform reasoning strategies regardless of task complexity.
+
+% 现有工作解决这个问题的局限
+To address these inefficiencies, an increasing number of studies aim to improve the inference efficiency of reasoning models. Current approaches fall into two primary categories. \textit{Length-controlled methods} directly constrain generation through explicit mechanisms: prompts like “think for n tokens” and corresponding length-control rewards in L1~\citep{aggarwalL1ControllingHow2025}; progressively limits on the model's reasoning space during training in ThinkPrune~\citep{houThinkPrunePruningLong2025}; and Scalable Chain of Thoughts~\citep{xuScalableChainThoughts2025} enforces budget constraints through forced termination. \textit{Reward-based approaches} incorporate length penalties into training objectives: HAPO~\citep{huangHAPOTrainingLanguage2025} leverages history-aware optimization to track minimal sufficient reasoning lengths, while “Think When You Need”~\citep{jiangThinkOnlyWhen2025} employs pairwise comparison rewards to trade off between quality and brevity. While effective at reducing token usage, these methods share a key limitation: they prioritize efficiency at the cost of accuracy, lacking mechanisms for models to decide autonomously when longer or shorter reasoning is appropriate.
+
+We identify two key challenges that hinder existing methods from achieving genuine reasoning efficiency. First, length penalties introduce systematic training biases that impair reasoning capabilities. In standard reinforcement learning settings~\citep{guoDeepseekr1IncentivizingReasoning2025}, correct solutions receive equal rewards regardless of length, allowing for unbiased exploration. However, length penalties disrupt this balance by consistently favoring shorter outputs, leading policies to gradually abandon long-reasoning strategies~\citep{houThinkPrunePruningLong2025,huangHAPOTrainingLanguage2025,louAdaCoTParetoOptimalAdaptive2025}.
+Second, static efficiency constraints fail to capture the continuous nature of reasoning complexity. Even adaptive methods rely on coarse mechanisms, such as binary think/no-think decisions~\citep{zhangAdaptThinkReasoningModels2025,fangThinklessLLMLearns2025} or fixed confidence thresholds~\citep{qiaoConCISEConfidenceguidedCompression2025}, which overlook the nuanced relationship between problem characteristics and computational requirements.
+
+
+% \textbf{Challenge 1: Exploration Space Collapse During Training.} When length penalties are introduced into reinforcement learning objectives, the reward landscape becomes fundamentally biased against extended reasoning. Consider the classical reward function in DeepSeek-R1~\citep{DeepSeek-R1}, which assigns binary scores (correct/incorrect) regardless of response length, enabling fair exploration across the entire context window. Length penalties destroy this equilibrium: shorter correct answers systematically receive higher rewards than longer correct ones, creating a self-reinforcing bias. During policy optimization, models progressively sample shorter responses, gradually abandoning the ability to perform extended reasoning even when necessary. This phenomenon has been observed across multiple approaches~\citep{HAPO,ThinkPrune,AdaCoT}, where the pursuit of efficiency leads to systematic degradation of reasoning capabilities on complex problems.
+
+% \textbf{Challenge 2: Static Constraints in Heterogeneous Problem Spaces.} Current methods apply uniform efficiency targets across all problems, ignoring the inherent variability in reasoning requirements. This manifests as a fundamental resource allocation problem: simple arithmetic receives excessive computational resources while complex multi-step proofs are under-resourced. Even sophisticated adaptive approaches struggle with this limitation—binary think/no-think decisions in AdaptThink~\citep{AdaptThink} and Thinkless~\citep{Thinkless}, fixed mode selection in "Learning When to Think"\cite{Learning-When-to-Think}, or confidence-based early stopping in ConCISE\cite{ConCISE} all fail to capture the continuous spectrum of reasoning complexity. The inability to dynamically adjust reasoning depth based on problem characteristics represents a fundamental gap in how we approach efficient reasoning.
+
+
+These limitations raise a fundamental question: \textbf{\textit{rather than enforcing uniform constraints, can models learn differentiated reasoning strategies through structured exploration?}} This question motivates our study of hierarchical budget exploration, where efficiency emerges not from rigid control but from structured exploration within budget-constrained subspaces.
+
+We propose \textbf{Hierarchical Budget Policy Optimization (\methodname)}, illustrated in the bottom-left part of Figure~\ref{fig:1}, a reinforcement learning framework that enables models to learn problem-specific reasoning strategies while retaining their ability to perform complex reasoning. The core idea is to partition the exploration space into multiple budget-constrained subgroups, allowing models to preserve reasoning diversity and uncover natural alignments between problem characteristics and required computational effort.
+Specifically, \methodname employs a hierarchical sampling strategy that partitions rollout samples into subgroups, each governed by a distinct token budgets. We implement this by inserting length prompts (e.g., \textit{``I will answer the question within n tokens"}) after the reasoning tag, thereby constructing multiple exploration spaces with budgets ranging from 512 to 2560 tokens. Unlike uniform sampling, this structure encourages the model to explore both concise and extended reasoning paths throughout training, effectively mitigating the systematic degradation of reasoning capabilities caused by global length penalties.
+
+% This underscores a fundamental open question: \textbf{Can an LLM learn to autonomously decide when and how deeply to reason, guided by both task complexity and its own capabilities?}
+
+% Motivated by this question, we propose Stratified Adaptive Reasoning (SAR), a reinforcement learning framework that enables models to learn problem-specific reasoning strategies without sacrificing their capacity for complex deliberation. Our key insight is that efficient reasoning should emerge from learned problem-complexity matching rather than externally imposed constraints. Unlike existing approaches that compress the entire reasoning space or rely on manual heuristics, SAR maintains diverse reasoning pathways while teaching models to recognize when different reasoning depths are appropriate.
+% SAR introduces three key innovations that work synergistically to achieve adaptive reasoning:
+
+% First, we implement Hierarchical Budget Exploration during training, where rollouts are partitioned into stratified subgroups with distinct token budget constraints. This design fundamentally differs from uniform sampling strategies—by maintaining separate exploration spaces for different reasoning lengths (e.g., <1K, 1-3K, 3-5K, >5K tokens), we ensure that models continue to sample from diverse length distributions throughout training. This prevents the systematic capability degradation observed when uniform penalties drive models away from extended reasoning. Crucially, each stratum maintains its own reward normalization, preventing length bias from affecting cross-stratum comparisons.
+
+% Second, we design Complexity-Aware Advantage Estimation that evaluates reasoning efficiency relative to problem characteristics rather than absolute length. Building on insights from decoupled optimization in hybrid reasoning~\citep{Thinkless}, we separate the learning objectives for reasoning mode selection and response quality improvement. For simple problems identified through initial sampling statistics, the advantage function amplifies rewards for concise solutions; for complex problems requiring extended deliberation, it maintains standard rewards to preserve reasoning quality. This creates a gradient landscape that naturally guides models toward appropriate effort-complexity pairings without manual intervention.
+
+% Third, we introduce Emergent Budget Allocation during inference, where models learn to predict appropriate reasoning depth based on problem features. Unlike explicit control mechanisms in L1~\citep{L1} or regression-based routing in ThinkSwitcher~\citep{ThinkSwitcher}, this behavior emerges naturally from the hierarchical training structure. The model develops sensitivity to problem complexity indicators—mathematical notation density, logical dependency chains, solution space constraints—and automatically adjusts its computational effort accordingly. This eliminates the need for external budget specifications or manual mode selection.
+
+% SAR introduces hierarchical budget exploration that partitions training rollouts into stratified subgroups with distinct token constraints. Instead of applying uniform penalties that compress the entire reasoning space, we partition rollouts into stratified subgroups with distinct token budget constraints. Each stratum maintains separate exploration spaces for different reasoning lengths, ensuring that models continue sampling from diverse length distributions throughout training. This prevents the systematic capability degradation observed when uniform penalties drive models away from extended reasoning.
+
+% SAR introduces stratified budget exploration that partitions training rollouts into subgroups with distinct token constraints (512, 1024, 2048, and 2560 tokens in our implementation). By maintaining separate exploration spaces for different reasoning lengths, we prevent the systematic capability degradation observed under uniform penalties. Each stratum operates under its own reward function that maintains monotonic non-decreasing rewards within the budget constraint, ensuring fair exploration while guiding models toward appropriate length targets. This structure guarantees continued sampling from diverse length distributions throughout training, with our experiments showing that the variance in rollout lengths remains consistently high compared to single-budget approaches.
+
+
+To guide efficient reasoning within each budget hierarchy, we introduce a piecewise reward function that combines the strengths of classical and cosine-shaped reward forms. Within the assigned budget, rewards are monotonically non-decreasing to preserve exploratory flexibility. Beyond the budget, cosine decay and length deviation penalties are applied to encourage the model to return to its designated exploration space. This design establishes differentiated incentives across subgroups: shorter budgets favor concise solutions with higher rewards, while longer budgets retain standard rewards for extended reasoning, enabling adaptive resource allocation in line with problem complexity.
+
+% To complement the hierarchical exploration structure, we develop complexity-aware advantage estimation that evaluates efficiency relative to problem characteristics rather than absolute length.  The reward function incorporates both classical exploration fairness and efficiency incentives through a carefully designed intersection point that dynamically adjusts preferences based on generation length. For problems requiring minimal reasoning, shorter budgets receive higher rewards; for complex problems, longer budgets provide greater incentives. This differential treatment creates a gradient landscape that naturally guides models toward appropriate effort-complexity pairings without imposing uniform constraints.
+
+% During inference, models trained with SAR exhibit emergent budget allocation, automatically adjusting reasoning depth based on problem features. Unlike methods requiring explicit control signals or manual mode selection, this adaptive behavior arises naturally from the hierarchical training structure. The model develops sensitivity to problem complexity indicators and adjusts computational effort accordingly, eliminating the need for external budget specifications.
+
+% Through this training process, models develop emergent budget allocation capabilities during inference. Unlike explicit control mechanisms~\citep{L1} or routing systems~\citep{ThinkSwitcher}, this behavior arises naturally from exposure to stratified training. Models learn to recognize problem complexity indicators and adjust computational effort accordingly, eliminating the need for external budget specifications.
+
+% Through this training process, models develop emergent adaptive behavior during inference. Unlike methods requiring explicit control mechanisms~\citep{aggarwalL1ControllingHow2025a} or mode selection~\citep{liangThinkSwitcherWhenThink2025}, \methodname-trained models exhibit significant variation in reasoning length based on problem characteristics. Under greedy decoding without prompts, models automatically adjust token usage from hundreds for simple problems to thousands for complex reasoning tasks, demonstrating learned sensitivity to problem requirements.
+
+Our evaluation on four reasoning benchmarks shows that \methodname achieves a superior trade-off between efficiency and accuracy compared to existing approaches, as the results shown in the right part of Figure~\ref{fig:1}. It consistently outperforms both length-controlled methods with hard constraints and adaptive methods based on discrete mode selection. More importantly, \methodname demonstrates genuinely adaptive behavior: it automatically adjusts token usage, ranging from hundreds for simple problems to thousands for complex reasoning tasks, indicating that the model has learned to allocate computational resources based on problem complexity.
+
+% Our evaluation on DeepSeek-R1-Distill-Qwen-1.5B and DeepScaleR-Preview-1.5B across mathematical reasoning benchmarks demonstrates that \methodname achieves superior efficiency-accuracy trade-offs. On Math500, \methodname maintains 86.2% accuracy while reducing average token usage to 2,158 tokens, outperforming L1-Max which achieves 82.8% accuracy with 3,173 tokens. More significantly, \methodname exhibits adaptive behavior that L1-Max lacks: while L1-Max consistently uses approximately 3,100 tokens regardless of problem difficulty, \methodname demonstrates substantial variation in reasoning length during inference. This adaptability extends to out-of-domain tasks, where \methodname achieves 43.48% accuracy on MMLU-Pro with 48% fewer tokens than baseline models.
+
+Our contributions are threefold:
+
+\begin{itemize}
+\item We introduce Hierarchical Budget Policy Optimization, a reinforcement learning framework that partitions the exploration space into budget-constrained hierarchies with differentiated rewards, preserving reasoning diversity while enabling adaptive resource allocation.
+\item We demonstrate that uniform efficiency constraints systematically collapse the exploration space and degrade reasoning capabilities, validating the necessity of structured exploration for maintaining model performance.
+\item We provide evidence of emergent adaptive reasoning, where HBPO-trained models automatically adjust reasoning depth based on problem characteristics, achieving up to 60.6\% reduction in token usage while improving accuracy by 3.14\% across mathematical reasoning benchmarks.
+\end{itemize}
+
+
+% \item We formalize the exploration space collapse problem in length-penalized reasoning training, demonstrating how uniform efficiency constraints create systematic biases that erode reasoning performance through reduced exploration of complex solution paths.
+
+
+
+% v2
+% The pursuit of enhanced reasoning capabilities in large language models has led to remarkable advances through reinforcement learning and long chain-of-thought methodologies~\citep{chenReasoningEraSurvey2025}. However, this progress has revealed a critical inefficiency: models systematically overthink even simple problems, generating verbose reasoning chains that bear little relation to problem complexity. A model may use thousands of tokens to solve basic arithmetic while applying similar effort to complex mathematical proofs, creating a fundamental misalignment between computational resources and actual reasoning demands.
+
+% This overthinking phenomenon challenges a core assumption in reasoning research: that longer reasoning invariably leads to better outcomes. Recent evidence contradicts this "longer is better" paradigm, showing that models can maintain high accuracy even when omitting intermediate thinking steps~\citep{maReasoningModelsCan2025}. This finding questions conventional wisdom~\citep{yeoDemystifyingLongChainofThought2025,jinImpactReasoningStep2024,yeLIMOLessMore2025a} and exposes the heterogeneous nature of reasoning requirements. L1 models~\citep{aggarwalL1ControllingHow2025a} demonstrate this clearly: achieving peak performance with ~1800 tokens on Math500 but requiring ~3000 tokens on Olympiad-Bench. Such dramatic variation suggests that uniform efficiency constraints fundamentally misunderstand the reasoning process.
+
+% Existing approaches attempt to control reasoning length through two strategies: length-constrained methods like L1~\citep{aggarwalL1ControllingHow2025a} and ThinkPrune~\citep{houThinkPrunePruningLong2025a}, and reward-based penalties~\citep{aroraTrainingLanguageModels2025}. However, these methods universally force accuracy to be sacrificed for brevity, lacking mechanisms for autonomous decision-making about when to apply concise versus extended reasoning.
+
+% We identify two fundamental challenges that existing methods fail to address:
+
+% \begin{itemize}
+%     \item \textbf{Exploration Space Collapse:} Length penalties create a systematic training bias toward shorter reasoning paths. Consider DeepSeek-R1's~\citep{guoDeepseekr1IncentivizingReasoning2025} classical reward function, which assigns binary scores regardless of length, enabling fair exploration across the context window. When length penalties are introduced, this fairness is destroyed: shorter correct answers consistently receive higher rewards than longer correct ones. Consequently, policy models progressively sample shorter responses during rollouts, systematically abandoning long-reasoning capabilities even for problems that require extended deliberation.
+%     \item \textbf{Problem-Agnostic Resource Allocation:} Current methods apply uniform efficiency constraints across heterogeneous problem types, resulting in severe resource misallocation. Simple problems receive excessive computational resources while complex multi-step reasoning tasks are under-resourced. This mismatch not only wastes computational capacity but also prevents models from developing nuanced understanding of when different reasoning strategies are appropriate.
+% \end{itemize}
+
+
+% To address these challenges, we propose STRABE (Stratified Budget Exploration), which enables models to learn adaptive reasoning length selection without sacrificing reasoning capabilities. Our key insight is that efficient reasoning should emerge from learned problem-complexity matching rather than externally imposed constraints.
+
+% The core idea is to maintain diverse reasoning exploration while teaching models to recognize when different reasoning depths are appropriate. We partition training rollouts into subgroups with different token budget constraints, ensuring that models continue exploring both short and long reasoning paths throughout training. This prevents the systematic capability loss that occurs when uniform length penalties drive models away from extended reasoning. Simultaneously, we design rewards that favor appropriate effort-complexity pairings, rewarding concise solutions for simple problems and extended reasoning for complex ones, while maintaining fair exploration within each reasoning length category.
+
+% By maintaining separate exploration spaces for different reasoning lengths, our approach fundamentally differs from existing methods that compress the entire reasoning space. The stratified structure ensures that models consistently sample from diverse length distributions during training, preserving access to long-reasoning capabilities. The budget-aware reward mechanism provides guidance signals for learning problem-appropriate resource allocation without sacrificing capacity for complex reasoning. This enables the emergence of adaptive reasoning behavior where models develop sensitivity to problem complexity and adjust their computational effort accordingly.
+
+
+% Our experimental evaluation demonstrates substantial performance gains alongside significant efficiency improvements. STRABE achieves average accuracy improvements of 15.09\% and 3.7\% compared to baseline models while reducing average reasoning length by 59.3\% and 63.6\% respectively. On Math500, our method maintains 86.2\% accuracy using only 2,158 tokens on average, compared to L1-Max's 82.8\% accuracy with 3,173 tokens. This efficiency gain stems from the model's learned ability to adaptively match reasoning effort to problem complexity, exhibiting significant variation in reasoning length during inference rather than the uniform token allocation pattern observed in existing methods.
+
+% The contributions of this work are threefold:
+
+
+% \begin{itemize}
+% \item We identify and formalize the exploration space collapse problem in length-penalized training, showing how uniform efficiency constraints systematically degrade reasoning capabilities by biasing models away from necessary long-reasoning exploration.
+% \item We propose stratified budget exploration with budget-aware rewards that preserves reasoning diversity while enabling adaptive length selection, demonstrating that models can learn to match computational effort to problem complexity without external constraints.
+% \item We achieve superior accuracy-efficiency trade-offs across six benchmarks, maintaining competitive performance while reducing token usage by up to xx.xx\%, challenging the conventional assumption that reasoning efficiency requires capability sacrifice.
+% \end{itemize}
+
+
+
+% v1
+% As the reasoning capabilities of Large Language Models (LLMs) continue to strengthen, reinforcement learning and Long Chain-of-Thought (LCoT) tuning methods have become mainstream approaches for enhancing reasoning accuracy. However, these methods often drive models to adopt lengthy reasoning paths~\citep{chenReasoningEraSurvey2025} , exhibiting obvious overthinking tendencies even when processing simple problems.
+
+% % Do NOT Think That Much for 2+3=? On the Overthinking of o1-Like LLMs
+
+% For example, models may repeatedly verify intermediate steps and switch reasoning strategies multiple times, resulting in convoluted and unnecessarily prolonged reasoning processes. Although current language models have achieved significant progress in reasoning accuracy, they lack perception of appropriate reasoning termination points, leaving substantial room for improvement in efficiency.
+
+% This issue has also prompted further reflection on the necessity of long reasoning. Recent work~\citep{maReasoningModelsCan2025} proposes that even when omitting thinking steps and directly outputting standard reasoning answers, models can still maintain high accuracy on most tasks. This finding challenges the conventional wisdom that ``longer reasoning leads to higher accuracy''~\citep{yeoDemystifyingLongChainofThought2025,jinImpactReasoningStep2024, yeLIMOLessMore2025a}, raising a fundamental question: Do models require complete and complex reasoning processes to arrive at correct answers?
+
+% To mitigate redundancy in reasoning processes, existing research has attempted to design length-based reward functions or constrain the model's reasoning space during rollouts to control the length of generated reasoning. For example, L1~\citep{aggarwalL1ControllingHow2025a} adds prompts (such as ``think for n tokens'') and sets corresponding length-control rewards, enabling models to reason according to the token count specified in prompts. ThinkPrune~\citep{houThinkPrunePruningLong2025a} trains by progressively limiting the model's reasoning space. Another approach~\citep{aroraTrainingLanguageModels2025} introduces length penalty terms in reward functions, balancing reasoning accuracy and efficiency by controlling the hyperparameters of these terms. While these methods suppress redundant generation to some extent, they universally suffer from a critical issue: model accuracy is forced to be sacrificed due to length control. Balancing accuracy and efficiency often relies on external parameters, with models lacking autonomous decision-making capabilities.
+
+% For L1 models, taking Math500 as an example, the model achieves optimal reasoning performance when generating approximately 1800 tokens on average, while on the more challenging Olympiad-Bench, it requires generating about 3000 tokens to reach peak accuracy. This indicates that optimal reasoning path lengths vary significantly across different tasks, making unified length control strategies difficult to adapt. Other efficient reasoning models all improve reasoning efficiency at the cost of sacrificing original accuracy. Although they formally achieve ``efficient reasoning'', they lack mechanisms for models to automatically balance ``best accuracy'' versus ``shortest'', essentially still relying on external settings rather than the model's own decision-making capabilities.
+% \begin{figure}[t]
+%   \centering
+%   \includegraphics[width=\textwidth]{figures/intro2.png}
+%   \caption{STRABE Effectiveness Demonstration.We aim to enable models to provide length-adaptive responses tailored to problems of varying difficulty levels. Traditional efficient reasoning methods impose reasoning length limitations through their reward functions, causing models to predominantly sample shorter responses during late training stages. This restricts the exploration of longer reasoning paths and consequently degrades reasoning performance. In contrast, our method employs stratified length budget prompting combined with corresponding reward mechanisms. This approach ensures that policy models consistently sample diversified reasoning length distributions during rollouts, enabling the selection of the most efficient reasoning paths for each problem.}
+%   \label{fig:1}
+%   \vspace{-1.5em}
+% \end{figure}
+
+% This paper focuses on a more fundamental question: How can models actively learn to complete reasoning using as few tokens as possible while maintaining reasoning accuracy? The key to achieving this goal lies in addressing two core challenges:
+
+% \textbf{1.Stratified Budget exploration In A Group}
+
+% DeepSeek-R1~\citep{guoDeepseekr1IncentivizingReasoning2025} uses a classical reward function to score a group of reasoning paths generated by policy model rollouts. For correct reasoning paths of different lengths, it assigns a score of 1, and 0 for incorrect ones. Classical reward function effectively ensures that policy models can freely rollout and explore within the context window space, with model exploration capabilities unconstrained by length. This represents a fair exploration strategy where exploration is guided only by ``correct/incorrect'' signals, with different rollout lengths receiving no differential treatment from reward functions. To pursue correctness, model exploration lengths gradually increase during training, leading to overthinking phenomena. To address this, we propose a stratified exploration spaces rollout strategy that prompts the model's fair multiple rollout space size by filling ``I will answer the question within $n$ tokens'' after \texttt{<think>}.Within the range of $n$ tokens, the model can freely rollout without length penalties.In a group of rollouts, $n$ takes multiple different values within the context window range to prompt the model to explore within spaces of size $n$. Rollouts with the same $n$ value are called a subgroup. Multiple subgroups ensure continuous sampling of reasoning paths with different length distributions during training, enabling the model to fully explore and find correct reasoning processes.
+
+% \textbf{2. Different Reward Function For Different Length Budget}
+
+% If a single length-related reward function is continuously applied to a group of samples in online sampling, reasoning lengths closer to the length optimization target consistently receive higher rewards during reward calculation. This guides the model to generate reasoning lengths approaching the optimization target direction during training. If correct short answers consistently receive higher rewards, as training progresses, the policy model will gradually prefer generating shorter reasoning paths for exploration during rollouts, leading to compression of long-path exploration space and weakened reasoning capabilities. To ensure that the model's online rollouts are not constrained by a single function leading to exploration collapse, we set corresponding length reward constraints for subgroups divided by length budget within a group of policy model rollouts. We propose a reward function that maintains both model rollout exploration space and length optimization, which can highlight rewards for ``shortest correct reasoning paths'' while satisfying exploration fairness during training, guiding the model toward efficient and concise reasoning optimization.The comparison between the two methods is presented in Figure~\ref{fig:1}.
+
+% We conducted comprehensive experiments on six widely used reasoning benchmarks, including both mathematical and non-mathematical domains. Experimental results demonstrate that our method achieves a superior balance between reasoning length and accuracy across multiple reasoning datasets. Furthermore, it enhances both the accuracy and efficiency of the model's reasoning capabilities.
+
+
+% To achieve high-quality responses with systematic length variation within the GRPO   ~\citep{guoDeepseekr1IncentivizingReasoning2025}algorithm, we introduce the stratified budget exploration rollout strategy(illustrated in Figure~\ref{fig:overview}). The fundamental concept underlying this strategy involves partitioning n samples into groups based on different exploration token budgets, thereby facilitating systematic rollouts across diverse reasoning lengths.
+% \begin{figure}[h]
+% \centering
+% \includegraphics[width=\textwidth]{figures/method2.png}
+% \caption{Overview of STRABE training.Given a query q, the actor model conducts a single rollout to generate a group of responses. This group is partitioned into n subgroups, each associated with a distinct token budget constraint. Within the allocated token budget, rewards for correct responses maintain a monotonically non-decreasing property to preserve exploration capabilities. Conversely, correct responses that exceed the token budget receive monotonically decreasing rewards, thereby constraining the model to operate within the specified exploration space. Each subgroup operates under differentiated reward function constraints. Parameter updates are performed through intra-group and inter-group rollout comparisons, involving scoring mechanisms and advantage calculations.}
+% \label{fig:overview}
+% \end{figure}
+
+% v1
+% Building on the insight that adaptive reasoning efficiency can emerge from structured exploration rather than uniform constraints, we present Hierarchical Budget Policy Optimization (HBPO). The core principle of HBPO is to partition the exploration space into budget-constrained subgroups, enabling models to maintain reasoning diversity while learning appropriate computational allocation for different problem types. We first describe the hierarchical budget exploration strategy (Section  \ref{sec:3.1}), then detail the differentiated reward mechanisms that guide adaptive behavior (Section  \ref{sec:3.2}), and finally explain how these components integrate within the policy optimization framework (Section \ref{sec:3.3}).
+
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/method.pdf}
+% \caption{The framework of our \methodname method. Given an input query, the model generates multiple responses, constrained by a subgroup of distinct token budgets (512, 1024, 2048, or 2560 tokens). Each budget group is guided by a customized reward function that promotes effective reasoning within the assigned limit while penalizing overuse. Policy updates are informed by both inter-group feedback (leveraging performance differences across budgets) and intra-group advantages (evaluating responses within the same budget).}
+\caption{Overview of Hierarchical Budget Policy Optimization. Given a query, HBPO generates responses across multiple budget-constrained subgroups (512, 1024, 2048, 2560 tokens), each guided by a piecewise reward function that preserves exploration within budgets while penalizing excess through deviation penalties. The advantage computation decomposes into intra-subgroup advantages (comparing responses against budget-specific baselines) and inter-subgroup advantages (enabling cross-budget learning through global comparison). This hierarchical structure enables models to learn efficient reasoning within constraints and adaptive budget selection based on problem complexity.}
+\label{fig:hbpo_overview}
+\end{figure}
+
+% \subsection{Hierarchical Budget Exploration}
+% \label{sec:3.1}
+
+% The fundamental challenge in efficient reasoning training lies in balancing exploration of diverse reasoning lengths with convergence toward efficient solutions. Traditional approaches either allow unrestricted exploration, leading to computational inefficiency, or impose uniform penalties that cause exploration collapse. HBPO addresses this through hierarchical partitioning of the exploration space.
+
+% Given a training batch of n rollout samples for each query, we partition these samples into k subgroups based on predetermined token budget constraints. Each subgroup is assigned a distinct budget $b_i \in \{b_1, b_2, ..., b_k\}$ where $b_1 < b_2 < ... < b_k$. To implement this partitioning, we augment the model's reasoning prompt with an explicit budget declaration: "I will answer the question within $b_i$ tokens" immediately following the `<think>` tag. This simple yet effective mechanism creates k distinct exploration spaces within a single training batch.
+
+% The hierarchical structure serves two critical purposes. First, it ensures that the model continues to explore both concise and extended reasoning strategies throughout training, as each subgroup maintains its own exploration trajectory. Second, it provides clear learning signals about appropriate reasoning lengths, as the model observes the relationship between budget constraints and problem-solving success across different subgroups. By maintaining this structured diversity, we prevent the systematic capability degradation observed when models converge prematurely to overly concise responses.
+
+% \subsection{Budget-Aware Reward Design}
+% \label{sec:3.2}
+
+% Within the hierarchical structure, reward design becomes crucial for guiding models toward adaptive behavior. We develop a piecewise reward function that balances two competing objectives: encouraging exploration within allocated budgets and promoting efficiency when possible.
+
+% \subsubsection{Intra-Budget Reward Function}
+
+% For samples within the same budget constraint, we design a reward function that integrates insights from both classical and efficiency-oriented approaches. The reward function takes the form:
+
+% $$R(c, l_{\text{gen}}, l_{\text{budget}}) = \begin{cases}
+% \min(f_{\text{explore}}, f_{\text{budget}}), & \text{if } c = 1 \text{ and } l_{\text{gen}} \leq l_{\text{max}} \\
+% 0, & \text{otherwise}
+% \end{cases}$$
+
+% where $c$ indicates answer correctness, $l_{\text{gen}}$ is the generated length, $l_{\text{budget}}$ is the allocated budget, and $l_{\text{max}}$ is the maximum context length. The two component functions are:
+
+% $$f_{\text{explore}} = \gamma \cdot \cos\left(\frac{\pi l_{\text{gen}}}{2l_{\text{max}}}\right) - \lambda |l_{\text{gen}} - l_{\text{budget}}|$$
+
+% $$f_{\text{budget}} = \gamma \cdot \cos\left(\frac{\pi l_{\text{budget}}}{2l_{\text{max}}}\right)$$
+
+% This formulation creates a unique reward landscape for each budget level. Within the allocated budget ($l_{\text{gen}} \leq l_{\text{budget}}$), the reward maintains a monotonically non-decreasing property, preserving the model's ability to explore longer reasoning when necessary. Beyond the budget constraint, the deviation penalty encourages the model to adhere to its designated exploration space. The parameters $\gamma$ and $\lambda$ control the relative importance of base rewards and length adherence, with $\lambda$ typically set as the reciprocal of the context window size to ensure appropriate scaling.
+
+% \subsubsection{Inter-Budget Reward Differentiation}
+
+
+% The key to achieving adaptive behavior lies in how rewards vary across different budget levels. For a given generation length, the reward functions of different budgets create a natural ordering that reflects problem complexity. When $l_{\text{gen}}$ is small, shorter budgets yield higher rewards than longer budgets, incentivizing concise solutions for simple problems. Conversely, when $l_{\text{gen}}$ is large, longer budgets provide higher rewards, supporting extended reasoning for complex tasks.
+
+% This differentiation emerges mathematically from the reward structure. For generation lengths below the minimum budget, the reward ordering follows: $R_{b_1} > R_{b_2} > ... > R_{b_k}$, encouraging the model to recognize when minimal reasoning suffices. For generation lengths exceeding the maximum budget, the ordering reverses, allowing necessary exploration for challenging problems. Between any two adjacent budgets, there exists a crossover point where their rewards equalize, creating a continuous spectrum of complexity-aware incentives.
+
+
+% \subsection{Policy Learning with Hierarchical Advantages}
+% \label{sec:3.3}
+
+
+% HBPO builds upon the Group Relative Policy Optimization (GRPO) framework, extending it to handle hierarchical exploration structures. During each training iteration, the model generates responses for a batch of queries, with samples automatically distributed across budget-constrained subgroups. The advantage estimation operates both within and across subgroups, creating rich learning signals about appropriate reasoning strategies.
+
+% Within each subgroup, advantages are computed relative to the subgroup mean, preserving the benefits of relative policy optimization while respecting budget constraints. Across subgroups, the differentiated rewards naturally guide the model toward appropriate budget selection based on problem characteristics. This dual-level optimization enables the model to simultaneously learn how to reason effectively within constraints and when different constraint levels are appropriate.
+
+% The training process maintains standard GRPO's computational efficiency while adding minimal overhead for budget assignment. The only additional requirement is the embedding of budget prompts during rollout generation, which incurs negligible cost compared to the reasoning process itself. Parameter updates follow the standard policy gradient formulation, with the hierarchical structure providing more informative gradients about reasoning efficiency.
+
+% Through this structured learning process, HBPO transforms the challenging problem of adaptive reasoning into a tractable optimization task. The model learns not through explicit programming of efficiency rules, but through discovering patterns in the relationship between problem characteristics, budget constraints, and solution success. This emergent understanding manifests during inference as genuinely adaptive behavior, where models automatically adjust their reasoning depth without external guidance.
+
+
+% \begin{figure}[t]
+% \centering
+% \begin{subfigure}[t]{0.48\textwidth}
+% \centering
+% \includegraphics[width=\textwidth]{figures/reward_design.png}
+% \caption{Evolution from classical and cosine rewards to HBPO's piecewise design. Classical rewards (flat) enable unrestricted exploration but lack efficiency incentives. Cosine rewards promote brevity but cause exploration collapse. HBPO's piecewise function balances both objectives through budget-aware segments.}
+% \label{fig:reward_design}
+% \end{subfigure}
+% \hfill
+% \begin{subfigure}[t]{0.48\textwidth}
+% \centering
+% \includegraphics[width=\textwidth]{figures/budget_comparison.png}
+% \caption{Reward differentiation across budget levels. The intersection point represents the complexity threshold where longer reasoning becomes more favorable. This creates natural incentives for matching reasoning effort to problem requirements.}
+% \label{fig:budget_comparison}
+% \end{subfigure}
+% \caption{HBPO reward mechanism design. (a) Comparison of reward functions showing how HBPO preserves exploration while incentivizing efficiency. (b) Inter-budget reward relationships that enable adaptive behavior emergence.}
+% \label{fig:reward_mechanism}
+% \end{figure}
+
+
+
+
+
+
+
+% \subsection{Stratified Length Budget Strategy Design}
+
+
+% We partition $n$ rollout samples into multiple subgroups, where each subgroup corresponds to different length budget constraints. Specifically, we embed rollout length prompts following the reasoning model's label as ``I will answer the question within $n$ tokens'', where the value of $n$ takes discrete values ranging from small to large within the context window. Rollout samples with the same $n$ value constitute a subgroup, ensuring that samples within each group have the same exploration space size.
+
+% \subsection{Reward Mechanism}
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}[t]{0.55\textwidth}
+%         \centering
+%         \includegraphics[height=4cm]{figures/3a.png}
+%         \caption{Comparison of different reward functions. The top-left shows classical reward, bottom-left shows cosine reward, and the right panel shows our proposed piecewise reward function with expected length constraint.}
+%         \label{fig:reward_comparison}
+%     \end{subfigure}
+%     \hfill
+%     \begin{subfigure}[t]{0.4\textwidth}
+%         \centering
+%         \includegraphics[height=4cm]{figures/3b.png}
+%         \caption{Reward functions for different length budgets.The intersection point shows reward preferences switch based on generation length.}
+%         \label{fig:multiple_length_reward}
+%     \end{subfigure}
+%     \caption{Reward mechanism design: (a) shows the evolution from classical and cosine rewards to our piecewise design, (b) illustrates the inter-subgroup reward comparison with different length budgets.}
+%     \label{fig:reward_mechanism}
+% \end{figure}
+% \subsubsection{Intra-Subgroup Reward Mechanism}
+% Within the same subgroup, all rollout samples correspond to identical reward function constraints. Our reward function design integrates the advantages of both classical reward functions and cosine-form reward functions. Classical reward functions maintain fair exploration space within the context window range during model training, allowing the model to attempt longer reasoning for complex problems without penalty. Cosine-form reward functions can monotonically decrease with the change in generation length, exhibiting good performance in efficient reasoning constraints. However, using cosine reward functions alone leads to rapid convergence of the model's average reasoning length to smaller values during training, unable to perform adaptive exploration based on problem difficulty. Therefore, we design a piecewise reward function as shown in Figure~\ref{fig:reward_mechanism}(a), hoping the model solves problems within the length budget range.
+
+% Specifically, our formula is:
+
+% \begin{equation}
+% R(C, n_{\text{gen}}, n_{\text{gold}}) = \begin{cases}
+% \min\left(f_1, f_2\right), & \text{if } C = 1 \text{ and } n_{\text{gen}} \leq L_{\max} \\
+% 0, & \text{otherwise}
+% \end{cases}
+% \label{eq:1}
+% \end{equation}
+
+% where:
+% \begin{align}
+% f_1 &= 4 \times \cos\left(\frac{\pi n_{\text{gen}}}{2L_{\max}}\right) - \alpha \left| n_{\text{gen}} - n_{\text{gold}} \right| \\
+% f_2 &= 4 \times \cos\left(\frac{\pi n_{\text{gold}}}{2L_{\max}}\right)
+% \label{eq:2}
+% \end{align}
+
+% and $C$ represents answer correctness, $n_{\text{gen}}$ denotes the generating length of online sampling, $n_{\text{gold}}$ represents the length budget, $L_{\max}$ is the maximum context length, and $\alpha$ is a hyperparameter controlling the sensitivity to length deviation.During training,$\alpha$  is set as the reciprocal of the context window size.$f_1$ incorporates both cosine decay and length deviation penalties, while $f_2$ reflects the reward contribution from the target length budget.
+
+
+% When $n_{\text{gen}} = n_{\text{gold}}$,  the reward function reaches the turning point where $f_1=f_2$:
+% \begin{equation}
+% 4 \times \cos\left(\frac{\pi n_{\text{gen}}}{2L_{\max}}\right) - \alpha \left| n_{\text{gen}} - n_{\text{gold}} \right| = 4 \times \cos\left(\frac{\pi n_{\text{gold}}}{2L_{\max}}\right)
+% \end{equation}
+
+% Within the length budget ($n_{\text{gen}} \leq n_{\text{gold}}$), the reward is defined as the minimum of the two terms. Since the reward is monotonically non-decreasing (see Appendix~\ref{A}), this design effectively prevents the model's exploration from being affected by length growth.
+
+% Outside the length budget ($n_{\text{gen}} > n_{\text{gold}}$),the reward adopts the first term,which incorporates cosine decay and a length deviation penalty. This encourages the model to return to reasoning within the specified exploration space, maintaining alignment with the length budget constraint.
+
+
+
+% \subsubsection{Inter-Subgroup Reward Mechanism}
+% In a rollout group, different subgroups have different length budget. Through differentiated inter-subgroup reward mechanisms, we guide the model to learn to select the most appropriate reasoning length for different problems. Our reward allocation follows the ``length-budget matching'' principle, achieving differentiated incentives through relative reward comparison between subgroups. Specifically, we provide positive incentives for short budget-short answer and long budget-long answer combinations. Conversely, we impose negative constraints on short budget-long answer and long budget-short answer combinations. Through the above design, we prompt the model to perform appropriate length exploration within the specified length budget. The relative reward ranking is: $R_{\text{short budget, short answer}} > R_{\text{long budget, short answer}} = R_{\text{long budget, long answer}} > R_{\text{short budget, long answer}}$.
+
+% The reward comparison between two subgroups is shown in Figure~\ref{fig:reward_mechanism}(b), where the turning points of the two curves represent their respective length budget sizes, with $R_1$ corresponding to a smaller length budget than $R_2$. The intersection point of the two curves represents the critical threshold of problem complexity. Before the intersection point, the reward for short budget is greater than that for long budget, representing short budget-short answer better than long budget-short answer. After the intersection point, the reward for long budget is greater than that for short budget, representing long budget-long answer better than short budget-long answer.
+
+% When length budget $n_{\text{gold}}$ values differ, the reward function values differ (see Equation~\ref{eq:1}).
+% When  the generation length is less than the smallest length budget, i.e.,$n_{\text{gen}} < \min(n_{\text{gold}})$, the reward function for correct paths is:
+% \begin{equation}
+% \min\left(4 \times \cos\left(\frac{\pi n_{\text{gen}}}{2L_{\max}}\right) + \alpha n_{\text{generated}} - \alpha n_{\text{gold}}, 4 \times \cos\left(\frac{\pi n_{\text{gold}}}{2L_{\max}}\right)\right)
+% \end{equation}
+
+% Since the $\cos$ function is monotonically decreasing, increasing $n_{\text{gold}}$ leads to a lower $f_2$(refer to Equation~\ref{eq:2}) value. Under the $\min$ operation, regardless of which term is selected, larger $n_{\text{gold}}$ corresponds to smaller rewards. This ensures that, for short generation lengths, shorter length budgets yield higher rewards.
+
+% When $n_{\text{gen}} > \max(n_{\text{gold}})$, the reward function for correct paths is:
+% \begin{equation}
+% \min\left(4 \times \cos\left(\frac{\pi n_{\text{gen}}}{2L_{\max}}\right) - \alpha n_{\text{gen}} + \alpha n_{\text{gold}}, 4 \times \cos\left(\frac{\pi n_{\text{gold}}}{2L_{\max}}\right)\right)
+% \end{equation}
+
+% Since:
+% \begin{equation}
+% 4 \times \cos\left(\frac{\pi n_{\text{gen}}}{2L_{\max}}\right) - \alpha n_{\text{gen}} + \alpha n_{\text{gold}} < 4 \times \cos\left(\frac{\pi n_{\text{gold}}}{2L_{\max}}\right)
+% \end{equation}
+
+% Thus, the reward value is determined by the first term.Here, a larger $n_{\text{gold}}$ leads to higher reward,ensuring that for longer generation lengths, larger length budgets are rewarded more favorably.
+
+% When the generation length is between two length budgets, an intersection point of the two rewards emerges. Before the intersection point, shorter length budgets offer higher rewards, while after the intersection point, longer length budgets provide greater incentives. This transition dynamically exchanges the relative reward values of the two budgets, enabling adaptive reward allocation aligned with the complexity of the problem.
+
+% Through differentiated rewards between subgroups and the design of intersection points, the optimization direction of solution paths includes not only ``optimizing toward shorter directions'' but also ``exploring toward longer spaces''. Through reward functions with different values corresponding to different budget length constraints, we achieve adaptive rewards oriented by problem difficulty.
+
+
+We present Hierarchical Budget Policy Optimization, as shown in Figure~\ref{fig:hbpo_overview}, which extends the Group Relative Policy Optimization (GRPO)~\citep{guoDeepseekr1IncentivizingReasoning2025} framework to enable adaptive reasoning through structured exploration. The core innovation lies in partitioning the exploration space into budget-constrained hierarchies and designing differentiated reward mechanisms that preserve reasoning diversity. We first introduce the hierarchical rollout strategy (Section \ref{sec:3.1}), then detail the budget-aware reward design (Section \ref{sec:3.2})), and finally describe the training procedure (Section \ref{sec:3.3})).
+
+\subsection{Hierarchical Budget Exploration}
+
+\label{sec:3.1}
+
+The fundamental challenge in efficient reasoning training is that uniform length penalties systematically bias models away from necessary long reasoning paths. To address this, we partition rollout samples into hierarchical subgroups, each operating within distinct token budget constraints. This structure ensures that models maintain exposure to diverse reasoning lengths throughout training.
+
+Given a query $q$, we generate $n$ rollout samples and partition them into $k$ subgroups $\{G_1, G_2, ..., G_k\}$, where each subgroup $G_i$ is associated with a token budget $b_i$. We implement this through budget-specific prompts embedded after the reasoning tag: "I will answer the question within $b_i$ tokens". The budget values form an ascending sequence $(b_1 < b_2 < ... < b_k)$, spanning from compact reasoning (e.g., 512 tokens) to extended deliberation (e.g., 2560 tokens).
+
+This hierarchical structure serves two key purposes. First, it prevents exploration space collapse, a common issue in efficiency training where models abandon long reasoning. By preserving separate exploration spaces, \methodname ensures sampling across diverse reasoning lengths. Second, it enables structured comparative learning: the model discovers the suitable computation for each problem by contrasting performance across budget levels, rather than relying on global optimization.
+
+%This hierarchical structure serves two critical purposes. First, it prevents the exploration space collapse observed in traditional efficiency training, where models progressively abandon long reasoning capabilities. By maintaining separate exploration spaces, we ensure continued sampling across the full spectrum of reasoning lengths. Second, it creates natural boundaries for comparative learning, where the model can discover which problems benefit from different computational budgets through structured exploration rather than global optimization.
+
+
+\subsection{Budget-Aware Reward Design}
+\label{sec:3.2}
+
+The effectiveness of hierarchical exploration hinges on careful reward design. Existing methods either use uniform rewards—supporting fair exploration but lacking efficiency incentives—or apply global length penalties, which improve efficiency at the cost of reasoning ability. HBPO addresses this trade-off with a piecewise reward function that integrates the strengths of both approaches.
+
+\subsubsection{Intra-Budget Reward Function}
+
+Within each budget-constrained subgroup, we design a reward function that balances reason exploration and efficiency. For a given budget $b$, the reward integrates length-based penalties $f_1$ that promote token efficiency with classical rewards $f_2$  that encourage diverse reasoning. The reward is formally defined as:
+\begin{equation}
+R(n_{\text{gen}} \mid b) = \begin{cases}
+f_1(n_{\text{gen}}, b), & \text{if correct, } n_{\text{gen}} > b, \text{ and } n_{\text{gen}} \leq L_{\max} \\
+f_2(b), & \text{if correct, } n_{\text{gen}} \leq b, \text{ and } n_{\text{gen}} \leq L_{\max} \\
+
+0, & \text{otherwise}
+\end{cases}
+\label{eq:reward_intra}
+\end{equation}
+where:
+\begin{align}
+f_1(n_{\text{gen}}, b) &= \beta \cdot \cos\left(\frac{\pi n_{\text{gen}}}{2L_{\max}}\right) - \alpha |n_{\text{gen}} - b| \label{eq:f1} \\
+f_2(b) &= \beta \cdot \cos\left(\frac{\pi b}{2L_{\max}}\right) \label{eq:f2}
+\end{align}
+Here, $n_{\text{gen}}$ denotes the number of generated tokens, $L_{\max}$ is the maximum context length, $\beta$ is a scaling factor, and $\alpha$ controls deviation sensitivity. The piecewise structure serves distinct purposes across different generation lengths. When $n_{\text{gen}} > b$, the reward follows $f_1$, incorporating both cosine decay and deviation penalty to guide the model back to its designated exploration space. When $n_{\text{gen}} \leq b$, the reward is bounded by $f_2$, ensuring monotonic non-decreasing behavior that preserves exploration within the budget.
+
+% This design achieves a critical balance: it maintains fair exploration within the budget (preventing premature convergence to minimal lengths) while creating clear incentives to stay within the allocated computational resources.
+
+\subsubsection{Inter-Budget Reward Differentiation}
+
+% The hierarchical structure enables natural reward differentiation when comparing responses across different budgets. For a fixed generation length $n_{\text{gen}}$, the reward function becomes a function of both generation length and budget choice:
+
+% \begin{equation}
+% R(C, n_{\text{gen}}, b) = \begin{cases}
+% \min(f_1(n_{\text{gen}}, b), f_2(b)), & \text{if } C = 1 \\
+% 0, & \text{otherwise}
+% \end{cases}
+% \end{equation}
+
+
+The hierarchical structure naturally induces reward differentiation across budgets. For a fixed generation length $n_{\text{gen}}$, different budget assignments yield different rewards according to Equation \ref{eq:reward_intra}, signaled as $R(b \mid n_{\text{gen}})$. This creates systematic preferences that align with problem complexity.
+
+% This formulation creates systematic preferences based on the alignment between generation length and budget allocation. For short generation lengths where $n_{\text{gen}} < \min(b_i)$, smaller budgets yield higher rewards due to the decreasing nature of $f_2(b)$ with respect to $b$. Conversely, for longer generation lengths where $n_{\text{gen}} > \max(b_i)$, larger budgets provide higher rewards through the $\alpha b$ term in $f_1$.
+
+% The critical insight is that these reward curves intersect at specific generation lengths, creating natural transition points. Before the intersection, shorter budgets are preferred (rewarding efficiency for simple problems). After the intersection, longer budgets become optimal (preserving capability for complex problems). This intersection point effectively represents a complexity threshold where the optimal budget choice transitions, enabling the model to learn problem-appropriate resource allocation through comparative advantage rather than external guidance.
+
+When $n_{\text{gen}} < \min(b_i)$, all budgets yield rewards determined by $f_2$, and smaller budgets receive higher rewards due to the monotonic decrease of the cosine function over the interval. This preference for smaller budgets on short responses encourages efficiency for simple problems. Conversely, when $n_{\text{gen}} > \max(b_i)$, larger budgets provide higher rewards through smaller deviation penalties $|n_{\text{gen}} - b_i|$ in $f_1$, preserving the model's ability to engage in extended reasoning when necessary.
+
+
+ As $n_{\text{gen}}$ increases from below $\min(b_i)$ to above $\max(b_i)$, the reward functions corresponding to different budgets transition in relative preference. The intersection points between reward curves represent complexity thresholds where the optimal budget choice transitions. Through comparative advantage across these differentiated rewards, the model learns to match computational resources to problem requirements without explicit complexity labels or external guidance.
+
+% This design creates a natural curriculum where simple problems gravitate toward smaller budgets (due to higher rewards for concise solutions) while complex problems utilize larger budgets (where extended reasoning is not penalized). The intersection points between reward curves represent complexity thresholds where the optimal budget choice transitions, enabling the model to learn problem-appropriate resource allocation.
+
+
+
+\begin{algorithm}[t]
+\caption{Hierarchical Budget Policy Optimization (HBPO)}
+\label{alg:hbpo}
+\begin{algorithmic}[1]
+\Require Initial policy $\pi_{\theta_0}$, budget levels $\mathcal{B} = \{b_1, ..., b_k\}$, learning rate $\eta$
+\For{iteration $t = 1, 2, ..., T$}
+    \State Sample batch of queries $\mathcal{Q}$ from training data
+    \For{each query $q \in \mathcal{Q}$}
+        \For{each budget $b_i \in \mathcal{B}$}
+            \State Generate $n/k$ responses with prompt ``I will answer within $b_i$ tokens''
+            \State Store responses in subgroup $G_i$
+        \EndFor
+        \For{each subgroup $G_i$}
+            \State Compute rewards $\{R_{i,j}\}$ using Equation \ref{eq:reward_intra}
+             \State Compute intra-subgroup mean reward: $\mu_i = \frac{1}{|G_i|} \sum_{j=1}^{|G_i|} R_{i,j}$
+            \State Compute budget rewards $R_{b_i}$ using Equation \ref{eq:f2}
+             \State Compute intra-subgroup advantage: $A_{i}^{\text{intra}} = \mu_i - R_{b_i}$
+        \EndFor
+        \State Compute inter-subgroup advantage: $A_{i,j}^{\text{inter}} = \frac{R_{i,j} - \frac{1}{n} \sum_{i,j} R_{i,j}}{\mathrm{std}(R)}$
+            \State Normalize final advantage: $A_{i,j} = A_{i}^{\text{intra}} + A_{i,j}^{\text{inter}}$
+
+    \EndFor
+    \State Update policy: $\theta_{t+1} \leftarrow \theta_t - \eta \nabla_\theta \mathcal{L}(\theta_t)$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+
+\subsection{Training Procedure}
+\label{sec:3.3}
+
+HBPO extends the standard GRPO framework by incorporating hierarchical sampling and budget-aware advantage computation into the policy optimization process, the algorithm is shown in Algorithm~\ref{alg:hbpo}. During each training iteration $t$, the model generates $n$ responses for a given query, which are automatically partitioned into $k$ subgroups based on their associated budget constraints. Each response is generated with an embedded budget prompt "I will answer the question within $b_i$ tokens", where $b_i \in \{b_1, b_2, ..., b_k\}$ represents the predetermined budget levels.
+
+
+The advantage computation leverages the hierarchical structure to enable both efficient reasoning within budgets and adaptive budget selection across problems. For the $j$-th response in the $i$-th subgroup, we compute the reward $R_{i,j}$ using the budget-aware reward function described in Section \ref{sec:3.2}. To capture the hierarchical nature of our exploration, we decompose the advantage into two complementary components that guide different aspects of learning.
+
+The intra-subgroup advantage measures how well responses perform relative to their budget expectation:
+$A_{i}^{\text{intra}} = \mu_i - R_{b_i}$, where $\mu_i = \frac{1}{|G_i|} \sum_{j=1}^{|G_i|} R_{i,j}$ is the mean reward within subgroup $i$, and $R_{b_i}$ represents the budget-specific baseline computed using Equation~\ref{eq:f2}. This term encourages optimization within each budget constraint, teaching the model to reason efficiently given a specific token allocation.
+
+
+The inter-subgroup advantage enables comparative learning across different budgets:
+\begin{equation}
+A_{i,j}^{\text{inter}} = \frac{R_{i,j} - \frac{1}{n} \sum_{i,j} R_{i,j}}{\text{std}(R)}
+\end{equation}
+This term compares each response against the global mean, creating natural preferences for budget selection. Responses from shorter budgets that achieve high rewards receive positive advantages, while unnecessarily long responses receive negative advantages, teaching the model to match computational effort to problem requirements.
+
+The final advantage combines both components with normalization for stable training:
+\begin{equation}
+A_{i,j} = A_{i}^{\text{intra}} + A_{i,j}^{\text{inter}}
+\end{equation}
+The policy optimization adopts GRPO's clipped objective to prevent destructive updates:
+\begin{equation}
+\mathcal{L}(\theta) = -\mathbb{E}_{(s,a) \sim \pi_{\theta_{\text{old}}}}\left[\min\left(\rho_\theta(s,a)A(s,a), \operatorname{clip}(\rho_\theta(s,a), 1-\epsilon_{\text{low}}, 1+\epsilon_{\text{high}})A(s,a)\right)\right]
+\end{equation}
+where $\rho_\theta(s,a) = \pi_\theta(a|s) / \pi_{\theta_{\text{old}}}(a|s)$ represents the probability ratio. The hierarchical advantages $A_{i,j}$ naturally flow through this objective, enabling the model to improve both within-budget efficiency and cross-budget selection without requiring separate optimization objectives or complex multi-stage training procedures.
+
+% The policy update follows the clipped objective from GRPO, modified to accommodate our hierarchical structure. Given the probability ratio $\rho(\theta) = \pi_\theta(a|s) / \pi_{\theta_{\text{old}}}(a|s)$, the loss function becomes:
+
+% \begin{equation}
+% \mathcal{L}(\theta) = -\mathbb{E}_{s,a}\left[\min\left(\rho(\theta)A_{i,j}, \text{clip}(\rho(\theta), 1-\epsilon, 1+\epsilon)A_{i,j}\right)\right]
+% \end{equation}
+
+% This objective preserves the stability benefits of GRPO while leveraging the structured exploration provided by hierarchical budgets. The key insight is that the hierarchical structure and differentiated rewards work synergistically: the structure ensures continued exploration across diverse reasoning lengths, while the rewards guide the model toward efficient allocation without explicit supervision. Through iterative optimization, the model learns not only to reason efficiently within each budget constraint but also to select appropriate budgets based on problem characteristics, achieving adaptive reasoning that emerges from the training dynamics rather than external control.
+
+
+
+% \begin{algorithm}[h]
+% \caption{Hierarchical Budget Policy Optimization (HBPO)}
+% \label{alg:hbpo}
+% \begin{algorithmic}[1]
+% \Require Initial policy $\pi_{\theta_0}$, budget levels $\mathcal{B} = \{b_1, ..., b_k\}$, learning rate $\eta$
+% \For{iteration $t = 1, 2, ..., T$}
+%     \State Sample batch of queries $\mathcal{Q}$ from training data
+%     \For{each query $q \in \mathcal{Q}$}
+%         \For{each budget $b_i \in \mathcal{B}$}
+%             \State Generate $n/k$ responses with prompt ``I will answer within $b_i$ tokens''
+%             \State Store responses in subgroup $G_i$
+%         \EndFor
+%         \For{each subgroup $G_i$}
+%             \State Compute rewards $\{R_{i,j}\}$ using Equation \ref{eq:reward_intra}
+%              \State Compute intra-subgroup mean reward: $\mu_i = \frac{1}{|G_i|} \sum_j R_{i,j}$
+%             \State Compute budget rewards $R_{b_i}$ using Equation \ref{eq:f2}
+%              \State Compute intra-group advantage: $A_{i,j}^{\text{intra}} = \mu_i - R_{b_i}$
+%         \EndFor
+%         \State Compute global mean reward: $\mu = \frac{1}{n} \sum_{i,j} R_{i,j}$
+%         \State Normalize final advantage: $A_{i,j} = \frac{A_{i,j}^{\text{intra}} + \mu - R_{i,j}}{\mathrm{std}}$
+
+%     \EndFor
+%     \State Update policy: $\theta_{t+1} \leftarrow \theta_t - \eta \nabla_\theta \mathcal{L}(\theta_t)$
+% \EndFor
+% \end{algorithmic}
+% \end{algorithm}
+
+
+
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets and Models.}
+
+We evaluate HBPO on mathematical reasoning tasks using the DeepScaleR dataset~\citep{deepscaler2025} for training, which comprises 40K high-quality mathematical problems from AIME, AMC, Omni-Math~\citep{gao2024omnimathuniversalolympiadlevel}, and STILL~\citep{minImitateExploreSelfImprove}. We employ two base models: DeepSeek-R1-Distill-Qwen-1.5B~\citep{deepseekai2025deepseekr1incentivizingreasoningcapability} and DeepScaleR-Preview-1.5B~\citep{deepscaler2025}.
+
+\paragraph{Implementation Details.} We implement HBPO using the VeRL framework~\citep{sheng2024hybridflow} with a context window of 4,096 tokens during training. Following DAPO~\citep{yuDAPOOpenSourceLLM2025a}, we set clipping thresholds $\epsilon_{\text{high}} = 0.28$ and $\epsilon_{\text{low}} = 0.2$, with KL divergence disabled to encourage exploration. Training proceeds for one epoch (629 steps) with a learning rate of $10^{-6}$ and batch size of 64. For hierarchical exploration, we generate 16 rollouts per query, partitioned equally into 4 subgroups with budget constraints $\mathcal{B} = {512, 1024, 2048, 2560}$ tokens.
+
+
+\paragraph{Evaluation Protocol.}
+We evaluate on four mathematical reasoning benchmarks of increasing difficulty: GSM8K~\citep{cobbe2021gsm8k}, Math500~\citep{lightman2023lets}, OlympiadBench~\citep{he2024olympiadbench}, and AIME25. Following standard practice~\citep{guoDeepseekr1IncentivizingReasoning2025}, we use temperature $T=0.6$, $top\_p=0.95$, and maximum context length of 32,768 tokens. We report pass@1 accuracy and average token usage under two evaluation settings: (1) natural reasoning where models freely determine their computational effort, and (2) efficiency prompting using \textit{``I will answer the question with minimal tokens"} after \texttt{
+<think>} to guide models toward efficient responses.
+
+% we populate the content after the reasoning tag with "I will answer the question with minimal tokens."
+
+\paragraph{Baselines.}
+
+We compare against several state-of-the-art efficient reasoning methods: (1) TLMRE\citep{aroraTrainingLanguageModels2025}, which adds length penalties to the RL objective with hyperparameter $\alpha$ controlling the penalty strength; (2) AdaptThink\citep{zhangAdaptThinkReasoningModels2025} and AutoThink\citep{tuLearningWhenThink2025}, which enable binary think/no-think mode selection; (3) L1-Max\citep{aggarwalL1ControllingHow2025}, which uses two-stage RL with explicit length targets. These methods represent different approaches to reasoning efficiency: global penalties (TLMRE), discrete mode selection (AdaptThink, AutoThink), and explicit control (L1-Max).
+
+
+
+% \begin{table}[htbp]
+% \centering
+% \small
+% \caption{Performance comparison of efficient reasoning methods. We report pass@1 accuracy (\%) and average token usage across four mathematical reasoning benchmarks. Best results are in bold.}
+% \label{tab:main_results}
+% \small
+% \setlength{\tabcolsep}{4pt}
+% \begin{tabular}{llcccccccccc}
+% \toprule
+% \multirow{2}{*}{\textbf{Method}} & \multirow{2}{*}{\textbf{Inference}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{Math500}} & \multicolumn{2}{c}{\textbf{Olympiad}} & \multicolumn{2}{c}{\textbf{AIME25}} & \multicolumn{2}{c}{\textbf{Average}} \\
+% & & Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens \\
+% \midrule
+% \multicolumn{12}{c}{\textit{Base Model: DeepSeek-R1-Distill-Qwen-1.5B}} \\
+% \midrule
+% Baseline & w/o prompt & 82.3 & 1,111 & 81.6 & 4,696 & 42.3 & 10,225 & 18.9 & 15,651 & 56.3 & 7,921 \\
+% & w/ prompt & 73.6 & 267 & 67.4 & 806 & 30.6 & 1,950 & 13.3 & 3,737 & 46.2 & 1,690 \\
+% \cmidrule{1-12}
+% TLMRE & w/o prompt & 79.8 & 285 & 79.6 & 2,114 & 47.5 & 5,436 & 28.9 & 10,513 & 58.9 & 4,587 \\
+% AdaptThink & w/o prompt & 85.0 & 816 & 79.6 & 1,220 & 42.9 & 2,501 & 18.9 & 6,813 & 56.6 & 2,838 \\
+% \cmidrule{1-12}
+% \textbf{HBPO (Ours)} & w/o prompt & 84.5 & 670 & 80.4 & 2,147 & 45.0 & 4,058 & 27.8 & 5,606 & 59.4 & 3,120 \\
+% & w/ prompt & 83.9 & 340 & 79.6 & 732 & 43.0 & 1,305 & 18.9 & 1,454 & 56.3 & 958 \\
+% \midrule
+% \multicolumn{12}{c}{\textit{Base Model: DeepScaleR-Preview-1.5B}} \\
+% \midrule
+% Baseline & w/o prompt & 86.1 & 1,684 & \textbf{87.0} & 2,938 & 51.6 & 5,330 & 30.0 & 9,023 & 63.7 & 4,744 \\
+% & w/ prompt & 78.6 & 270 & 74.4 & 1,037 & 37.2 & 1,963 & 16.7 & 4,733 & 51.7 & 2,001 \\
+% \cmidrule{1-12}
+% AutoThink & w/o prompt & 85.9 & 1,420 & 86.6 & 1,992 & \textbf{52.7} & 4,463 & 27.8 & 8,620 & 63.2 & 4,124 \\
+% L1-Max & w/o prompt & 86.1 & 670 & 85.0 & 3,260 & 48.2 & 3,094 & 22.2 & 3,163 & 60.4 & 2,547 \\
+% & 512 tokens & 85.7 & 331 & 81.4 & 609 & 42.0 & 861 & 7.8 & 996 & 54.2 & 699 \\
+% & 1024 tokens & 87.6 & 1,188 & 82.2 & 1,235 & 45.4 & 1,518 & 22.2 & 1,661 & 59.4 & 1,401 \\
+% \cmidrule{1-12}
+% \textbf{HBPO (Ours)} & no prompt & \textbf{87.6} & 790 & 86.2 & 1,818 & 50.0 & 2,861 & \textbf{31.1} & 3,988 & \textbf{63.7} & \textbf{2,364} \\
+% & w/ prompt & 85.6 & 394 & 82.4 & 726 & 47.2 & 1,193 & 22.2 & 1,476 & 59.4 & 947 \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+
+
+\subsection{Main Results}
+
+\paragraph{Hierarchical training enables efficient reasoning without capability trade-offs.}
+
+Tables~\ref{tab:natural_reasoning} and \ref{tab:constrained_reasoning} present our results under natural and efficiency-constrained settings, respectively. Under natural reasoning conditions, HBPO demonstrates consistent improvements across both base models. Applied to DeepSeek-R1-Distill-Qwen-1.5B, HBPO improves average accuracy from 56.3\% to 59.4\% while reducing token usage by 60.6\% (from 7,921 to 3,120). On the stronger DeepScaleR model, HBPO maintains the baseline's 63.7\% accuracy while achieving 50.2\% token reduction (from 4,744 to 2,364). Notably, HBPO achieves 31.1\% accuracy on AIME25, outperforming the DeepScaleR baseline and all efficiency methods. This improvement on the most challenging benchmark while using fewer tokens demonstrates that hierarchical exploration not only prevents capability degradation but can enhance reasoning by eliminating computational redundancy.
+
+The efficiency prompting setting makes the performance gains from hierarchical training more evident. While baseline models suffer catastrophic degradation when forced to minimize tokens (over 10\% accuracy drop), HBPO maintains robust performance. Applied to DeepScaleR, HBPO achieves 59.4\% average accuracy with only 947 tokens, matching L1-Max (1024)'s accuracy while using 32\% fewer tokens. This indicates that our training enables effective exploration across the entire efficiency spectrum.
+
+\begin{table}[htbp]
+\small
+\centering
+\caption{Performance under natural reasoning conditions. Models freely allocate computational resources based on learned strategies.}
+\label{tab:natural_reasoning}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lcccccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{MATH500}} & \multicolumn{2}{c}{\textbf{Olympiad}} & \multicolumn{2}{c}{\textbf{AIME25}} & \multicolumn{2}{c}{\textbf{Average}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}\cmidrule(lr){8-9} \cmidrule(lr){10-11}
+& Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens \\
+\midrule
+\multicolumn{11}{c}{\textit{Base: DeepSeek-R1-Distill-Qwen-1.5B}} \\
+\midrule
+Baseline & 82.3 & 1,111 & \textbf{81.6} & 4,696 & 42.3 & 10,225 & 18.9 & 15,651 & 56.3 & 7,921 \\
+TLMRE ($\alpha$=0.4) & 74.6 & 221 & 69.8 & 1,835 & 35.8 & 4,838 & 17.8 & 9,753 & 49.5 & 4,162 \\
+AdaptThink & \textbf{85.0} & 816 & 79.6 & 1,220 & 42.9 & 2,501 & 18.9 & 6,813 & 56.6 & 2,838 \\
+\textbf{HBPO (Ours)} & 84.5 & 670 & 80.4 & 2,147 & \textbf{45.0} & 4,058 & \textbf{27.8} & 5,606 & \textbf{59.4} & 3,120 \\
+\midrule
+\multicolumn{11}{c}{\textit{Base: DeepScaleR-Preview-1.5B}} \\
+\midrule
+Baseline & 86.1 & 1,684 & \textbf{87.0} & 2,938 & 51.6 & 5,330 & 30.0 & 9,023 & 63.7 & 4,744 \\
+AutoThink & 85.9 & 1,420 & 86.6 & 1,992 & \textbf{52.7} & 4,463 & 27.8 & 8,620 & 63.2 & 4,124 \\
+L1-Max & 86.1 & 670 & 85.0 & 3,260 & 48.2 & 3,094 & 22.2 & 3,163 & 60.4 & 2,547 \\
+\textbf{HBPO (Ours)} & \textbf{87.6} & 790 & 86.2 & 1,818 & 50.0 & 2,861 & \textbf{31.1} & 3,988 & \textbf{63.7} & {2,364} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Performance under efficiency prompting reasoning. Models are explicitly prompted to minimize token usage.}
+\label{tab:constrained_reasoning}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lcccccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{MATH500}} & \multicolumn{2}{c}{\textbf{Olympiad}} & \multicolumn{2}{c}{\textbf{AIME25}} & \multicolumn{2}{c}{\textbf{Average}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}\cmidrule(lr){8-9} \cmidrule(lr){10-11}
+& Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens \\
+\midrule
+\multicolumn{11}{c}{\textit{Base: DeepSeek-R1-Distill-Qwen-1.5B}} \\
+\midrule
+Baseline & 73.6 & 267 & 67.4 & 806 & 30.6 & 1,950 & 13.3 & 3,737 & 46.2 & 1,690 \\
+\textbf{HBPO (Ours)} & 83.9 & 340 & 79.6 & 732 & 43.0 & 1,305 & 18.9 & 1,454 & 56.3 & 958 \\
+\midrule
+\multicolumn{11}{c}{\textit{Base: DeepScaleR-Preview-1.5B}} \\
+\midrule
+Baseline & 78.6 & 270 & 74.4 & 1,037 & 37.2 & 1,963 & 16.7 & 4,733 & 51.7 & 2,001 \\
+L1-Max (512) & 85.7 & 331 & 81.4 & 609 & 42.0 & 861 & 7.8 & 996 & 54.2 & 699 \\
+L1-Max (1024) & 87.6 & 1,188 & 82.2 & 1,235 & 45.4 & 1,518 & 22.2 & 1,661 & 59.4 & 1,401 \\
+\textbf{HBPO (Ours)} & 85.6 & 394 & 82.4 & 726 & 47.2 & 1,193 & 22.2 & 1,476 & 59.4 & 947 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\paragraph{Adaptive behavior emerges from hierarchical training rather than explicit control.} The distinction between HBPO and existing methods becomes evident in their token allocation patterns. L1-Max exhibits remarkably uniform behavior across problem difficulties, using 3,260 tokens on MATH500 and 3,163 tokens on AIME25 despite the significant complexity gap between these benchmarks. In contrast, HBPO demonstrates genuine problem sensitivity with token usage varying from 1,818 on MATH500 to 3,988 on AIME25. This 2.2× variation directly correlates with problem complexity and emerges naturally from the differentiated reward mechanism, which creates distinct optimization landscapes for different budget levels. Through comparative advantage across these landscapes, models learn to assess problem requirements without external guidance.
+
+
+% \paragraph{Budget-aware prompt enable robust performance under extreme constraints.}
+
+
+% This robustness stems from the piecewise reward design that ensures exploration across the entire efficiency spectrum during training.
+
+% The model learns efficient reasoning within the 512-token budget while simultaneously developing extended reasoning capabilities in higher budgets, creating a versatile system capable of operating effectively under varying computational constraints.
+
+
+
+
+
+% \subsubsection{Datasets and Models}
+% We conduct training on the DeepScaleR~\citep{deepscaler2025} dataset, a mathematics dataset consisting of 40K question-answer pairs drawn from AIME, AMC, Omni-Math~\citep{gao2024omnimathuniversalolympiadlevel} and STILL~\citep{minImitateExploreSelfImprove}. We use DeepSeek-R1-Distill-Qwen-1.5B~\citep{deepseekai2025deepseekr1incentivizingreasoningcapability} (abbreviated as Distill-R1-1.5B) and DeepScaleR-Preview-1.5B~\citep{deepscaler2025} (abbreviated as DeepScaleR) as our primary models. The trained models are referred to as H1-d and H1, respectively.
+
+
+
+% %Distill-R1-1.5B is a distilled variant of DeepSeek-R1, created by initializing the model with Qwen1.5B and training on the data generated by DeepSeek-R1. DeepScaleR is the state-of-the-art 1.5B reasoning model obtained from Distill-R1-1.5B via context-extended reinforcement learning.
+
+% \subsubsection{Training and Evaluation}
+% We implement our approach based on the VeRL framework ~\citep{sheng2024hybridflow}. During training, the context window size is set to 4096. Following the training settings of DAPO~\citep{yuDAPOOpenSourceLLM2025a}, we set $\epsilon_{high}$ to 0.28, $\epsilon_{low}$ to 0.2 and remove the KL divergence loss term. The training learning rate is fixed at 1e-6, and the entropy loss coefficient is set to 0. We use a batch size of 64 and train for 1 epoch, which consists of 629 steps. The sampling temperature $T$ is set to 0 during training.
+
+% We generate 16 rollout samples for each problem and partition them equally into 4 subgroups to maintain balance between intra-group and inter-group sample numbers.The exploration length budget $b_{i}$ for the 4 subgroups are set to 512, 1024, 2048, and 2560 respectively.
+
+% % We perform decoding by appending ``I will answer the question within $n_{\text{gold}}$ tokens'' after \texttt{<think>} during decoding.
+
+% % We conduct both in-domain and out-of-domain testing to comprehensively evaluate changes in model reasoning performance and efficiency. Additionally, we evaluate on two challenging out-of-domain datasets: MMLU-Pro and GPQA-Diamond. During evaluation.
+
+% For mathematical reasoning, we test on GSM8K~\citep{cobbe2021gsm8k},Math500~\citep{lightman2023lets},OlympiadBench~\citep{he2024olympiadbench}and AIME25. Following DeepSeek-AI~\citep{guoDeepseekr1IncentivizingReasoning2025}, we use a sampling temperature of 0.6, top-p of 0.95, and a maximum context length of 32,768 tokens. Our evaluation metrics consider both pass@1 accuracy and response length, with the length metric reported as the average number of response tokens across each evaluation set.
+% % Due to the limited AIME data, we sample 3 times per question and record the average accuracy to ensure evaluation stability.
+
+% % Additional experimental results can be found in the appendix~\ref{B}.
+
+% % we use greedy decoding ($T=0$) with maximum context windows set to 32768 (far exceeding the exploration space during training)
+% % and 8192 (following L1 settings).
+
+% %
+
+% \subsubsection{Baselines}
+% Our baseline models are Distill-R1-1.5B and DeepScaleR, two powerful 1.5B reasoning models. Furthermore, we evaluate our proposed approach against the following methods:
+% We employ two prompting strategies during testing:
+
+% \textbf{(1) No-prompt strategy:} No content is appended after \texttt{<think>}, allowing the model to reason freely. The comparison models include:
+% \begin{itemize}
+
+% \item \textbf{TLMRE:} An efficient reasoning method that incorporates a length-related penalty term into reinforcement learning optimization objective, where the penalty strength is controlled by the hyperparameter $\alpha$. We select the model with $\alpha = 0.2$ for evaluation, which achieves a good balance between accuracy and efficiency.
+% \item \textbf{AdaptThink:} Trained on Distill-R1-1.5B for adaptive reasoning, allowing the model to choose between think-then-answer and direct-answer reasoning modes based on problem difficulty.
+% \item \textbf{AutoThink:} Based on the DeepScaleR model, using DeepScaleR-Preview-Dataset for multi-stage targeted reinforcement learning training, enabling the model to autonomously decide whether to think during reasoning, achieving adaptive reasoning.
+% \item \textbf{L1-Qwen-1.5B-Max (L1-Max):} A length control method that conducts two-stage reinforcement learning training by prompting the model to generate responses of specified lengths and incorporating the distance between actual and target lengths as a penalty in the reward function.
+% \end{itemize}
+
+% \textbf{(2) Fixed-prompt strategy:} Appending ``I will answer the question with minimal tokens'' after \texttt{<think>} for reasoning. This prompting makes the model's reasoning mode consistent with the policy model during training, more clearly demonstrating the training effects. Under this condition, we mainly compare with baseline and the length-controllable L1-Max model.
+% % % and the TLMRE model with $\alpha=0.4$ for optimal reasoning efficiency.
+
+% \subsection{Main Results}
+
+% % % \subsubsection{Results with Context Window 32768}
+% Table~\ref{tab:main_results_32k} shows the main results.Under the no-prompt decoding strategy,H1-d achieves a 3.14\% improvement in average accuracy compared to Distill-R1-1.5B while reducing average reasoning length by 60.6\%. H1 preserves the accuracy of DeepScaler, reducing average reasoning length by 50.2\%.Compared to other methods, our approach achieves the best performance while using the fewest tokens on average across 4 datasets with significant difficulty variations.Notably, L1-Max demonstrates limited adaptability by consistently utilizing around 3100 tokens for reasoning across problems of varying difficulty levels. This uniform token allocation proves excessively redundant for Math500 problems while simultaneously revealing insufficient exploration capability for more challenging AIME problems.In contrast, H1 manifests as significant variation in reasoning length during inference, demonstrating the adaptive nature of our reasoning mechanism.
+
+% Under the fixed-prompt decoding strategy, baseline model accuracy represents the initial performance when prompts are added before training. While filling prompts after \texttt{<think>} substantially reduces reasoning length, it also leads to over 10\% accuracy degradation. After training, our model maintains both high accuracy and efficiency during filling tests. At the same average accuracy of 59\%, our approach consumes 32\% fewer tokens than L1 by dynamically adjusting response lengths across datasets.
+% \begin{table}[htbp]
+% \centering
+% \small
+% \caption{Accuracy and Token Usage Comparison Across Methods.}
+% \label{tab:main_results_32k}
+% \resizebox{\textwidth}{!}
+% {
+% \begin{tabular}{llC{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}}
+% \toprule
+% \multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Inference setting}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{MATH500}}  & \multicolumn{2}{c}{\textbf{Olympiad}} & \multicolumn{2}{c}{\textbf{AIME25}}& \multicolumn{2}{c}{\textbf{Average}} \\
+% \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10} \cmidrule(lr){11-12}
+% & &\textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓}\\
+% \midrule
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{12}{c}{\textbf{Baseline}} \\
+% \midrule
+% \multirow{2}{*}{Distill-R1-1.5B}
+
+%        &w prompt &73.62&267&67.41&806&30.56&1950&13.33&3737&46.23&1690 \\
+%        &w/o prompt &82.34 & 1111& 81.6&4696 &42.28 &10225 &18.89 &15651 & 56.28&7921 \\
+% \multirow{2}{*}{DeepSaleR}
+%      &w prompt &78.62&270&74.41&1037&37.24&1963&16.67&4733&51.74 &2001\\
+%      &w/o prompt &86.05 & 1684& \textbf{87}&2938 & 51.63&5330 &30 &9023 &63.67 &4744 \\
+% \midrule
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{12}{c}{\textbf{Other Methods}} \\
+% \midrule
+% \multirow{1}{*}{TLMRE($\alpha$=0.2)}
+%      &w/o prompt &79.76 &285 &79.6 &2114 &47.48 &5436 &28.89 &10513& 58.93& 4587\\
+% {AdaptThink}
+%   &w/o prompt & 84.99&816 &79.6 &1220 & 42.88&2501 &18.89 &6813& 56.59& 2838 \\
+
+
+% {AutoThink}
+%      &w/o prompt  &85.9 & 1420& 86.6&1992 &\textbf{52.67} &4463 &27.78 &8620&63.24 &4124  \\
+
+% \multirow{3}{*}{L1-Max}
+%  &think for 512 tokens &85.67&331&81.4&609&41.99&861&7.78&996&54.21&699\\
+%            &think for 1024 tokens &87.64&1188&82.2&1235&45.4&1518&22.22&1661&59.37&1401\\
+%        &w/o prompt &86.13 &670 &85 &3260 & 48.22&3094 &22.22 &3163& 60.39& 2547 \\
+
+
+
+
+
+% \midrule
+
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{12}{c}{\textbf{Ours}} \\
+% \midrule
+
+
+% \multirow{2}{*}{H1-d}
+% &w prompt &83.85&340&79.6&732&43.03&1305&18.89&1454&56.34&958\\
+%  &w/o prompt &84.53 &670 &80.4 &2147 & 44.96& 4058& 27.78&5606& 59.42&3120 \\
+
+%  \multirow{2}{*}{H1}
+%   &w prompt &85.6&394&82.4&726&47.18&1193&22.22&1476&59.35&947\\
+%  &w/o prompt & \textbf{87.57} &790 &86.2 &1818 &50 &2861 &\textbf{31.11} &3988& \textbf{63.72}&\textbf{2364}  \\
+
+
+% \bottomrule
+% \end{tabular}
+% }
+% \end{table}
+
+% % \subsubsection{Results with Context Window 8192}
+% % \subsubsection{Results with Fixed Prompting}
+% %
+
+
+% To facilitate a more comprehensive performance comparison with the L1-Max model, we have supplemented our evaluation with two additional configurations: testing under the no-prompt strategy with a window size of 8192 (consistent with the L1 evaluation) and testing under the fixed-prompt strategy with a window size of 4096 (aligned with the training setup).Results are shown in Table~\ref{tab:fixed_prompt}.
+% \begin{table}[htbp]
+% \centering
+% \caption{Performance Comparison with L1-Max.}
+% \label{tab:fixed_prompt}
+% \resizebox{\textwidth}{!}{
+% \begin{tabular}{llcccccccccc}
+% \toprule
+% \multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Inference Setting}} & \multicolumn{2}{c}{\textbf{Math500}} & \multicolumn{2}{c}{\textbf{AIME24}} & \multicolumn{2}{c}{\textbf{AIME25}} & \multicolumn{2}{c}{\textbf{Olympid-Bench}}& \multicolumn{2}{c}{\textbf{Average}} \\
+% \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10} \cmidrule(lr){11-12}
+% && \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓}\\
+% \midrule
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{12}{c}{\textbf{Baseline}} \\
+% \midrule
+% \multirow{2}{*}{Distill-R1-1.5B }             & w/ prompt & 66 &568 & 3.33& 1543& 16.67& 1646& 32.05 &993 &28.68 & 1196 \\
+%       & w/o prompt & 70.2 &3234 &10 & 7648&20 & 7383&30.56 &5748  & 36.02&5802   \\
+% \multirow{2}{*}{DeepScaleR }            &w/ prompt& 70 & 722& 13.33& 1970& 16.67&2629 & 34.12 &1344 &33.87 &1696  \\
+%       & w/o prompt& 83.67 & 2827& 30&68 & 26.67&6658 &47.77  &4860 &48.85 & 5072 \\
+% \midrule
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{12}{c}{\textbf{Length Control Method}} \\
+% \midrule
+
+% \multirow{6}{*}{L1-Max}
+%         & w/ prompt & 70.6 &450 &13.33 &751 &16.67 &799 &37.09  &641 &32.09 &676  \\
+%        & think for 512 tokens & 79.4 &630 &16.67 &1163 &20 & 1013&43.32  & 828&38.73 & 895 \\
+%        & think for 1024 tokens & 81.6 &1229 & 26.67&1876 &23.33 &1591 & 47.63 &1392 & 42.14& 1534 \\
+%        & think for 2048 tokens & 84.6 & 1796& 26.67& 2148&24 &2147 &47.92  &1936 & 44.96& 2020 \\
+%        & think for 3600 tokens & 82.8 &3350 &13.33 &3436 &23.33 &3590 & 47.92 &3533 &45.81 &3523  \\
+%        & w/o prompt &82.8  &3173 &20 & 3067&33.33 &3167 & 4852 &3090 & 45.50&3141  \\
+
+
+
+% \midrule
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{12}{c}{\textbf{Ours}} \\
+% \midrule
+
+% \multirow{2}{*}{\hspace{0em}{H1-d}}& w/ prompt  & 80.8 &724 &20 & 1719&13.33 &1470 &42.28 &1185  & 39.60&1264  \\
+% & w/o prompt& 82.8 &2109 &30 & 5448& 30& 5676& 4341 & 38.81& 45.05&4178  \\
+% \multirow{2}{*}{\hspace{0em}{H1}}& w/ prompt & 85.4 &705 &23.33 & 1852& 20& 1646& 45.99 &1199 &44.18 & 1388 \\
+% & w/o prompt & 86.2 &1858 &26.67 &4807 &30 &3913 &48.81  &3026 &50.25 &3245  \\
+
+
+% \bottomrule
+% \end{tabular}}
+% \end{table}
+
+% Under the no-prompt decoding strategy, L1-Max achieves comparable total token usage (3300) to Strabe, yet exhibits approximately 5\% lower average accuracy. Notably, L1-Max demonstrates limited adaptability by consistently utilizing around 3100 tokens for reasoning across problems of varying difficulty levels. This uniform token allocation proves excessively redundant for Math500 problems while simultaneously revealing insufficient exploration capability for more challenging AIME problems.In contrast, Strabe manifests as significant variation in reasoning length during inference, demonstrating the adaptive nature of our reasoning mechanism.
+
+% Under the fixed-prompt decoding strategy, the average token consumption is further substantially reduced. Baseline models that were not trained with fixed prompts typically omit reasoning steps and provide direct answers, resulting in significant performance degradation. However, our trained model maintains high accuracy under fixed-prompt conditions and achieves superior performance compared to L1-Max while utilizing comparable token usage (approximately 1400 tokens).
+
+
+\begin{wrapfigure}[10]{r}{0.4\textwidth}
+    \vspace{-3em}
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/5-1.pdf}
+    \vspace{-0.7cm}
+    \caption{Training Dynamics: Mean Token Length (solid Line) ± Standard Deviation (dotted line).}
+    \label{fig:5-1}
+\end{wrapfigure}
+
+\subsection{Analysis of Hierarchical Structure}
+
+\paragraph{Optimal hierarchy emerges from balancing intra-group learning and inter-group exploration.}
+To understand the impact of hierarchical structure on performance, we systematically analyze different budget configurations while maintaining a constant average budget of 1,536 tokens. Table~\ref{tab:budget_analysis} reveals a clear performance progression: single-budget training achieves only 59.8\% average accuracy, demonstrating the limitations of uniform exploration. The performance improves to 61.7\% with dual budgets and reaches an optimal of 63.7\% with our 4-budget configuration.
+
+
+\begin{table}[h!]
+\centering
+\small
+\caption{Impact of hierarchical granularity on performance. The 4-budget configuration achieves optimal balance between and within-group learning and exploration diversity.}
+\label{tab:budget_analysis}
+\small
+\begin{tabular}{lC{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}}
+\toprule
+\multirow{2}{*}{\textbf{Configuration}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{MATH500}} & \multicolumn{2}{c}{\textbf{Olympiad}} & \multicolumn{2}{c}{\textbf{AIME25}} & \multicolumn{2}{c}{\textbf{Average}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}\cmidrule(lr){8-9} \cmidrule(lr){10-11}
+& Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens \\
+\midrule
+Single ($b$=1536) & 85.6 & 327 & 83.4 & 1,055 & 48.1 & 2,301 & 22.2 & 3,686 & 59.8 & 1,842 \\
+Dual ($b\in\{512,2560\}$) & 86.4 & 816 & 85.6 & 1,849 & 48.2 & 2,938 & 27.8 & 4,104 & 61.7 & 2,427 \\
+\textbf{4-budget} & \textbf{87.6} & 790 & 86.2 & 1,818 & 50.0 & 2,861 & \textbf{31.1} & 3,988 & \textbf{63.7} & 2,364 \\
+6-budget & 87.0 & 809 & \textbf{87.2} & 1,893 & \textbf{50.9} & 3,084 & 26.7 & 3,934 & 62.9 & 2,430 \\
+8-budget & 87.4 & 864 & 85.6 & 1,836 & 49.9 & 2,899 & 28.9 & 4,019 & 62.9 & 2,405 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Single-budget training reduces to traditional uniform sampling without inter-budget reward differentiation. Dual budgets introduce basic differentiation between short (512) and long (2,560) reasoning, improving accuracy by 1.9\%. The 4-budget configuration achieves optimal performance by offering sufficient granularity for adaptive learning, while ensuring enough samples per subgroup to support effective intra-group optimization. Further increasing the number of budgets to 6 or 8 slightly degrades performance, with a 0.8\% drop, as fewer samples per subgroup weaken intra-group learning signals. This reveals a fundamental trade-off: exploration diversity must be balanced with statistical reliability for effective policy learning.
+
+% 6-budgets和8-budgets的设置需不需要交代一下，包含哪些长度限制
+
+% \setlength{\intextsep}{1pt}
+
+
+\paragraph{Training dynamics demonstrate how hierarchical structure maintains exploration space.} Figure~\ref{fig:5-1} shows the generation dynamics between HBPO and a single-budget baseline. While single-budget training converges to a narrower range of responses, HBPO exhibits different dynamics. The average generation length stabilizes around 1,400 tokens, accompanied by broader yet controlled variance — a direct consequence of its hierarchical structure. This sustained variability is essential, as it captures the preservation of exploration diversity, which is crucial in preventing degradation of reasoning capability.
+
+
+% This stability enables monotonic improvement on Math500, reaching 86.2\% accuracy compared to 77.6\% for cosine-penalized training.
+
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}[t]{0.45\textwidth}
+%         \centering
+%         \includegraphics[width=\textwidth]{figures/5-1.png}
+%         \label{fig:5-1}
+%     \end{subfigure}
+%     \hspace{0.04\textwidth}  % <-- 调整这里的间距
+%     \begin{subfigure}[t]{0.45\textwidth}
+%         \centering
+%         \includegraphics[width=\textwidth]{figures/5-2.png}
+%         \label{fig:5-2}
+%     \end{subfigure}
+%     \caption{Training dynamics comparison reveals fundamental differences in exploration behavior. (a) Hierarchical budgets enable greater response length extension in the later stages of training, despite operating under the same average budget of 1,536 tokens. (b) Length variance reflects exploration diversity, with hierarchical budgets maintaining a wider range of rollout lengths—approximately 400 tokens more than single-budget settings on average.}
+%     \label{fig:5-1}
+% \end{figure}
+
+\paragraph{HBPO achieves efficiency through adaptive resource allocation rather than uniform compression.} As results shown in Table~\ref{tab:normal-performance} and Figure~\ref{fig:5-2}, traditional GRPO with cosine reward achieves some efficiency (average 1,150 tokens) but suffers significant accuracy degradation, particularly on complex tasks where it achieves only 23.3\% on AIME25. The model learns to generate universally short responses regardless of problem requirements, a form of mode collapse that sacrifices capability for efficiency.
+
+\begin{table}[h!]
+\centering
+\caption{Comparison with traditional efficient reasoning methods under natural inference conditions.}
+\label{tab:normal-performance}
+\small
+\begin{tabular}{lcccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{MATH500}} & \multicolumn{2}{c}{\textbf{Olympiad}} & \multicolumn{2}{c}{\textbf{AIME25}}\\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}\cmidrule(lr){8-9}
+& Acc & Tokens & Acc & Tokens & Acc & Tokens & Acc & Tokens \\
+\midrule
+Classic Reward & 86.2 & 661 & 86.2 & 1,605 & 49.1 & 3,174 & 24.4 & 4,309 \\
+Cosine Reward & 83.0 & 195 & 77.6 & 478 & 42.0 & 1,271 & 23.3 & 2,657 \\
+\textbf{HBPO}(Budget-aware Reward) & \textbf{87.6} & 790 & 86.2 & 1,818 & \textbf{50.0} & 2,861 & \textbf{31.1} & 3,988 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\begin{figure}[hbtp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/5-2.pdf}
+  \caption{Comparison of training dynamics and validation performance between cosine reward and budget-aware reward methods. (Left) Training token length evolution shows that cosine reward exhibits a sharp decline in early training stage(0-100 steps), while budget-aware reward maintains relatively consistent token lengths throughout training. (Middle) Validation accuracy demonstrates that budget-aware reward achieves sustained performance improvements with higher final accuracy, whereas cosine reward shows greater volatility and inferior performance. (Right) Validation token count reveals that budget-aware reward enables the model to gradually discover the optimal reasoning length, while cosine reward suffers from excessive compression from the early training stages, leading to suboptimal token generation.}
+  \vspace{-0.5cm}
+  \label{fig:5-2}
+\end{figure}
+
+HBPO encourages effective exploration during training by employing budget-aware rewards rather than uniform compression, enabling the model to identify optimal reasoning lengths for efficient inference more accurately.
+
+\subsection{Reasoning Pattern Analysis}
+
+\paragraph{HBPO develops different reasoning strategies based on problem complexity.}
+To understand how models improve efficiency, we analyze reasoning patterns through two lenses: the proportion of exploratory thinking versus direct solution generation, and the frequency of reflection keywords that indicate deliberative processes. Figure~\ref{fig:5-3} reveals striking differences between methods.
+
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{figures/5-3-3.pdf}
+    \caption{Reasoning pattern analysis across methods and problem difficulties. Thinking proportions and reflection keyword frequencies show HBPO's adaptive adjustment, with keywords properly contained within thinking segments.}
+    \label{fig:5-3}
+\end{figure}
+
+HBPO exhibits clear adaptation to problem difficulty. The proportion of thinking content increases monotonically from 81\% on GSM8K to 89\% on AIME25, while reflection keywords (wait, alternatively, but, remember, check, and verify) rise from 6 to 30 occurrences per problem. This pattern supports our differentiated reward design, showing that the model learns to identify when longer reasoning adds value.
+
+L1-Max improves efficiency through uniform length control, maintaining nearly constant thinking proportions (90-92\%) and keyword frequencies (29-32) across three datasets. This rigidity reveals mechanical optimization rather than intelligent adaptation. AutoThink attempts adaptive reasoning but exhibits problematic patterns: excessive thinking on simple problems (86\% on GSM8K) and insufficient adjustment for complex ones. Moreover, AutoThink exhibits an average of 1.7 and 1.5 reasoning-related keywords per problem in the solution segments on the MATH500 and Olympiad benchmarks, indicating that reasoning processes leak into what should be direct answers.
+
+
+The efficiency prompting setting provides further insight into adaptive capabilities. When instructed to minimize tokens, HBPO exhibits progressive keyword scaling (1.8 on GSM8K to 13.1 on AIME25), demonstrating that the model has internalized problem-complexity relationships. L1-Max, when explicitly prompted to ``think for 1024 tokens", shows minimal variation (10.6 to 13.5), revealing its inability to differentiate between problem requirements even under explicit efficiency instructions. These patterns confirm that hierarchical training enables genuine adaptive reasoning rather than uniform optimization.
+
+\begin{wraptable}{r}{0.44\textwidth}
+\centering
+\caption{Performance on GPQA-Diamond}
+\label{tab:ood}
+\small
+\begin{tabular}{lC{1.2cm}C{1.2cm}}
+\toprule
+\textbf{Model} & \textbf{Acc} & \textbf{Tokens} \\
+\midrule
+DeepScaleR & 33.84 & 4,762 \\
+L1-Max & 33.33 & 1,227 \\
+AutoThink & 34.41 & 3,787 \\
+\textbf{HBPO} & \textbf{34.72} & 2,101 \\
+\bottomrule
+\end{tabular}
+\end{wraptable}
+
+\paragraph{Generalization to scientific reasoning validates domain-agnostic efficiency learning.}
+To assess whether hierarchical exploration enables general efficiency principles rather than task-specific optimization, we evaluate on GPQA-Diamond, a challenging scientific reasoning benchmark outside our training domain. Table~\ref{tab:ood} shows that HBPO maintains the highest accuracy (34.72\%) while reducing token usage by 55\% compared to baseline. This performance on out-of-distribution tasks demonstrates that hierarchical training teaches fundamental principles of computational resource allocation that transfer across reasoning domains.
+
+% \begin{table}[h!]
+% \centering
+% \caption{Out-of-distribution performance on GPQA-Diamond scientific reasoning}
+% \label{tab:ood}
+% \small
+% \begin{tabular}{lcc}
+% \toprule
+% \textbf{Model} & \textbf{Accuracy (\%)} & \textbf{Avg Tokens} \\
+% \midrule
+% DeepScaleR & 33.84 & 4,762 \\
+% L1-Max & 33.33 & 1,227 \\
+% AutoThink & 34.41 & 3,787 \\
+% \textbf{HBPO} & \textbf{34.72} & 2,101 \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+
+
+
+
+
+These analyses collectively demonstrate that HBPO's hierarchical exploration framework addresses the fundamental challenges in efficient reasoning. By maintaining exploration diversity through budget hierarchies and enabling adaptive learning through differentiated rewards, HBPO teaches models to recognize the computational requirements of different problems and allocate resources accordingly. The result is a system that achieves efficiency not through constraint but through understanding.
+
+
+
+% \textbf{Balanced Intra- and Inter-Group Rollouts Achieve Maximum Performance} We conducted a systematic analysis of various length budget configurations. For a single-length budget, the size was set to 1536, with one subgroup conducting 16 rollouts. For dual-length budgets, the sizes were set to 512 and 2560, with two subgroups each conducting 8 rollouts. For four-length budgets, the sizes were set to 512, 1024, 2048, and 2560, with four subgroups each conducting 4 rollouts. To ensure experimental fairness, the average length budget size for setups was kept at 1536.
+
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}[t]{0.55\textwidth}
+%         \centering
+%         \includegraphics[height=4.9cm]{figures/5a.png}
+%         \caption{}
+%         \label{fig:5a}
+%     \end{subfigure}
+%     \hfill
+%     \begin{subfigure}[t]{0.4\textwidth}
+%         \centering
+%         \includegraphics[height=4.9cm]{figures/5b.png}
+%         \caption{}
+%         \label{fig:5b}
+%     \end{subfigure}
+%     \caption{Comparison between different rollout strategy: Both figures are sampled and plotted every 30 steps.(a) shows the mean generating length during train process. The x-axis represents the steps, and the y-axis represents the number of tokens. (b) illustrates the average difference between the longest and shortest rollout lengths within a batch of queries.The outer circular dimension represents the steps, and the polar coordinate ticks indicate the number of tokens.}
+%     \label{fig:5-1}
+% \end{figure}
+
+
+
+
+
+% In the dynamic analysis of training, Figure~\ref{fig:5-1} shows the average rollout length as well as the difference between the longest and shortest rollout lengths during training (representing the exploration range). Dashed lines represent the mean of the dependent variable during training. The results indicate that, due to an identical average length budget, the three primary experiments exhibited negligible differences in average rollout length, with virtually identical means. Hierarchical length budgets showed fluctuations around the mean during training, while single-length budget exhibited lower average rollout lengths in the later stages, reflecting reduced exploration in the later training phases. Additionally, the variance in rollout length for single-length budget was significantly smaller than for hierarchical length budgets exploration spaces, demonstrating the effectiveness of hierarchical length budgets reward mechanisms in controlling diverse rollout lengths.
+
+% % Notably, dual-length budgets exhibited greater variance in the rollout process due to the significant length differences between the two subgroups. In contrast, the four-length budgets setup, with more evenly distributed length constraints, demonstrated better balance.
+
+% Additionally, we supplemented the experiments with six-length budgets (512, 1024, 1536, 2048, 2560, 3072, where subgroups with lengths of 1536 and 2048 conducted 4 rollouts each, and the remaining subgroups conducted 2 rollouts each) and eight-length budgets (256, 512, 768, 1024, 1536, 2048, 2560, 3072, with each subgroup conducting 2 rollouts) for comparative analysis.We tested the training performance under context window settings of 32,768 tokens.
+% Performance evaluation results(see Table~\ref{tab:length-budget-performance}) showed an increasing trend in accuracy: single-length budget < dual-length budgets < four-length budgets. This validates that differentiated length-controlled sampling effectively maintains model exploration.
+
+% The underlying reason is that single-length budget training only explored the 0-1536 range, lacking differentiated exploration and reward mechanisms for various generation lengths.Dual-length budgets improved accuracy due to its highly differentiated settings (512 and 2560), but the model's fine-grained perception of length was limited, leading to performance inferior to more fine-grained exploration budgets.
+
+% Moreover, configurations with more subgroups (6 and 8 length budgets) demonstrated slight performance drops. This could be attributed to the subgroup size:Given the constraint on total rollout numbers, smaller subgroups result in relatively limited intra-group comparisons. This constrains the model's ability to effectively reason in specific length budgets, diminishing the advantages of differentiated reward mechanisms. This phenomenon illustrates the trade-off between intra-subgroup and inter-subgroup exploration strategies.
+% %Additionally, since the average exploration length of six-length budgets exceeded 1536 while that of eight-length budgets fell below 1536, these setups exhibited longer and more concise inference modes, respectively.
+
+
+
+% \begin{table}[h!]
+% \centering
+% \small
+% \caption{Performance Metrics under Different Length Budget Configurations}
+% \resizebox{\textwidth}{!}{
+% \begin{tabular}{llC{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}C{0.6cm}}
+% \toprule
+% \multirow{2}{*}{\textbf{Train Setting}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{MATH500}} & \multicolumn{2}{c}{\textbf{Olympaid}} & \multicolumn{2}{c}{\textbf{AIME25}}& \multicolumn{2}{c}{\textbf{Average}} \\
+% \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9} \cmidrule(lr){10-11}
+% & \textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓} & \textbf{Acc↑} & \textbf{\#Tok↓}& \textbf{Acc↑} & \textbf{\#Tok↓} \\
+% \midrule
+% \rowcolor[HTML]{E8E8E8}
+% \multicolumn{11}{c}{\textbf{DeepSaleR}} \\
+% \midrule
+
+% \textbf{Different Exploration Spaces Setting}
+%       &  &  &   &  &  &  &  \\
+% \multirow{1}{*}{\hspace{2em}{Single length budget}}
+% & 85.6 &327  &83.4 &1055&48.07&2301&22.22&3686&59.82&1842\\
+
+
+% % \textit{{\hspace{2em}{Dual length budgets}}} \\
+% \multirow{1}{*}{\hspace{2em}{Dual length budgets}}
+% & 86.35 &816  &85.6 &1849&48.22&2938&27.78&4104&61.70&2427\\
+
+
+% % \textit{{\hspace{2em}{4 length budgets}}} \\
+% \multirow{1}{*}{\hspace{2em}{4 length budgets}}
+% & 87.57 &790  &86.2 &1818&50&2861&31.11&3988&63.72
+% &2364\\
+
+
+% % \textit{{\hspace{2em}{6 length budgets}}} \\
+
+% \multirow{1}{*}{\hspace{2em}{6 length budgets}}
+
+% & 86.96 &809  &87.2 &1893&50.89&3084&26.67&3934&62.93&2430\\
+% % \textit{{\hspace{2em}{8 length budgets}}} \\
+
+% \multirow{1}{*}{\hspace{2em}{8 length budgets}}
+%   &87.41 &864  &85.6  &1836 &49.85&2899&28.89&4019&62.94&2405\\
+
+
+% \bottomrule
+% \end{tabular}
+% }
+% \label{tab:length-budget-performance}
+% \end{table}
+
+% \textbf{Significantly Superior to Traditional Efficient Reasoning Methods} We compared two traditional GRPO training methods as baselines, employing classic reward functions and cosine reward functions respectively, while keeping the rollout strategy unchanged. In traditional methods, the absence of content filled after the \texttt{<think>} prompt during training leads to a more extended reasoning style. The policy model tends to compress both the thinking and answering processes uniformly. Constrained by the smaller training window size of 4,096, even training with a classic reward function can achieve certain efficient inference results(see Table~\ref{tab:normal-performance}).Under normal sampling configurations, the model generally performs worse than H1. This can be attributed to the single reward function's insufficient guidance mechanism for response length adaptation across problems of varying complexity, resulting in the model's inability to precisely regulate length for specific problems during inference.
+% \begin{table}[h!]
+% \centering
+% \caption{Performance comparison between traditional efficient reasoning methods and our method}
+% \resizebox{\textwidth}{!}{
+% \begin{tabular}{llcccccccc}
+% \toprule
+% \multirow{2}{*}{\textbf{Train Setting}} & \multirow{2}{*}{\textbf{Inference Setting}} & \multicolumn{2}{c}{\textbf{GSM8K}} & \multicolumn{2}{c}{\textbf{Math500}} & \multicolumn{2}{c}{\textbf{Olympaid-Bench}} & \multicolumn{2}{c}{\textbf{AIME25}} \\
+% \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+% && \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓} & \textbf{Acc↑} & \textbf{Avg-Tokens↓} \\
+% \midrule
+
+% \textbf{Normal Sampling}
+%  \\
+% \textit{\hspace{2em}{Reward Type=classic}}
+
+% \multirow{1}{*}{\hspace{}{}}
+% & {+w/o prompt} & 86.2 & 661 & 86.2 &1605 & 49.11 & 3174 & 24.44 &4309  \\
+
+% \textit{\hspace{2em}{Reward Type=cos}}
+% \multirow{1}{*}{\hspace{}{}}
+% & +w/o prompt& 83.02 & 195 & 77.6 & 478& 41.99 & 1271& 23.33 & 2657 \\
+% % \hdashline
+% \textbf{Hierarchical Sampling}\\
+% \multirow{2}{*}{\hspace{2em}{H1}}&w prompt &85.6&394&82.4&726&47.18&1193&22.22&1476\\
+%  &w/o prompt & \textbf{87.57} &790 &86.2 &1818 &\textbf{50} &2861 &\textbf{31.11} &3988  \\
+% \bottomrule
+% \end{tabular}
+% }
+
+% \label{tab:normal-performance}
+% \end{table}
+
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}[t]{0.45\textwidth}
+%         \centering
+%         \includegraphics[height=4cm]{figures/5-2a.png}
+%         \caption{}
+%         \label{fig:5-2a}
+%     \end{subfigure}
+%     \hfill
+%     \begin{subfigure}[t]{0.45\textwidth}
+%         \centering
+%         \includegraphics[height=4cm]{figures/5-2b.png}
+%         \caption{}
+%         \label{fig:5-2b}
+%     \end{subfigure}
+%     \caption{Comparison with traditional efficient methods: (a) presents the mean generation length every 30 steps during the training process, while (b) illustrates the dynamic performance on Math500 every 20 steps.}
+%     \label{fig:5-2}
+% \end{figure}
+
+% We specifically analyzed the differences between the cosine reward function constraint and our method. In the early stages of training (0–100 steps), the policy model under cosine constraints rapidly reduces the rollout length while maintaining a high overall level(Figure~\ref{fig:5-2a}), resulting in stable accuracy on Math500(Figure~\ref{fig:5-2b}). However, after 100 steps, the average rollout length fluctuates within excessively small values, leading to a loss of exploration capability for complex problems. Consequently, the accuracy on Math500 begins to exhibit unstable oscillations within a lower range.
+
+% In contrast, our hierachical length budget method stabilizes the average rollout length through differentiated length control, ensuring a balanced distribution of different lengths throughout the training process. This leads to a steady upward trend in performance during the dynamic evaluation of Math500, effectively avoiding the performance fluctuations caused by degraded exploration capabilities in traditional methods.
+
+% Our trained H1 model demonstrates nearly identical average token usage in the fixed-prompt decoding strategy compared to the model trained with a single cosine reward function. This aligns with the average length variations observed during training dynamics. However,the cosine function's bias toward shorter responses during training compresses the exploration space for longer answers. Consequently, during inference, the model lacks sufficient experience in addressing challenging problems. While it produces longer responses when confronted with difficult problems, these extended outputs do not represent effective reasoning.
+
+% \textbf{In-depth Analysis of H1's Adaptive Reasoning Behavior} We perform a comprehensive analysis of the thinking-versus-solution length proportions across various methods and datasets. Furthermore, we quantify the average occurrence of reasoning transition keywords per question and analyze their distribution within the thinking and solution segments.
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}[t]{0.45\textwidth}
+%         \centering
+%         \includegraphics[height=4cm]{figures/5-3a.png}
+%         \caption{}
+%         \label{fig:5-3a}
+%     \end{subfigure}
+%     \hfill
+%     \begin{subfigure}[t]{0.45\textwidth}
+%         \centering
+%         \includegraphics[height=4cm]{figures/5-3b.png}
+%         \caption{}
+%         \label{fig:5-3b}
+%     \end{subfigure}
+%     \caption{Reasoning Patterns across methods and datasets.}
+%     \label{fig:5-3}
+% \end{figure}
+
+% We selected six representative reasoning transition keywords: \textit{but}, \textit{wait}, \textit{alternatively}, \textit{check}, \textit{remember}, and \textit{verify}, and computed their average frequency per question(see Figure~\ref{fig:5-3b}). These keywords, which are mainly concentrated in the thinking segment for both L1 and H1, serve as markers of exploratory and reflective reasoning processes. As dataset difficulty increases, H1 adaptively increases its overall reasoning length, the proportion of thinking content, and the frequency of keywords. In contrast, \textsc{L1} exhibits consistent behavior across the three more challenging datasets, maintaining a relatively stable reasoning length, thinking ratio, and keyword frequency.
+
+% Although AutoThink is capable of switching reasoning modes based on question difficulty, its control strategy is relatively coarse-grained. On simpler datasets like \textsc{GSM8K}, it tends to produce overly long reasoning traces with high thinking proportions. Additionally, on AIME25, its adjustment on reasoning length and keyword frequency is insufficient. On Math500 and Olympiad Bench, AutoThink shows a smaller proportion of thinking content, but a higher frequency of reasoning keywords in the solution part, suggesting that even in a “no-thinking” mode, traces of thinking still appear within the solution part.
+
+
+% % \textbf{Generalizability to OOD Task.} We assess the generalization capacity of H1 to out-of-distribution (OOD) task on the GPQA-Diamond~\citep{LLM_Reasoning_Benchmark} benchmark. We report the average accuracy over 8 sampled responses per question.
+
+
+% % \begin{table}[h!]
+% % \centering
+% % \caption{Performance in OOD task}
+% % \scalebox{0.85}{%  % 缩放到85%
+% % \begin{tabular}{llc}
+% % \toprule
+% % \multirow{2}{*}{\textbf{Model}}  & \multicolumn{2}{c}{\textbf{GPQA-Diamond}}   \\
+% % \cmidrule(lr){2-3}
+% %  & \textbf{Acc↑} & \textbf{Avg-Tokens↓}  \\
+% % \midrule
+% % % \rowcolor[HTML]{E8E8E8}
+% % % \multicolumn{7}{c}{\textbf{Baseline}} \\
+% % % \midrule
+% % \multirow{1}{*}{DeepSaleR}
+% %       &33.84&4762 \\
+% % % \midrule
+% % % \rowcolor[HTML]{E8E8E8}
+% % % \multicolumn{7}{c}{\textbf{Other Methods}} \\
+% % % \midrule
+% %          \multirow{1}{*}{L1-Max}
+% %      &33.33&1227  \\
+
+% % {AutoThink}
+% %     &34.41&3787 \\
+
+% % % \midrule
+% % % \rowcolor[HTML]{E8E8E8}
+% % % \multicolumn{7}{c}{\textbf{Ours}} \\
+% % % \midrule
+% % \multirow{1}{*}{H1}
+% %   &34.72&2101\\
+% % \bottomrule
+% % \end{tabular}%
+% % }
+% % \label{tab:ood}
+% % \end{table}
+% % As shown in Table~\ref{tab:ood}, H1 reduces the average number of tokens by 55\% while preserving model performance.
+
+% \begin{figure}[htbp]
+% \centering
+% \begin{minipage}[t]{0.52\textwidth}
+% \textbf{Generalizability to OOD Task.} To evaluate the out-of-distribution generalization of H1, we conduct experiments on the GPQA-Diamond~\citep{LLM_Reasoning_Benchmark} benchmark, a rigorous scientific dataset consisting of 198 multiple-choice questions. Performance metrics are averaged over eight sampled responses per question.
+
+% As shown in Table~\ref{tab:ood}, \textbf{H1} reduces the average number of tokens by \textbf{55\%} while preserving model performance.
+% \end{minipage}
+% \hfill
+% \begin{minipage}[t]{0.44\textwidth}
+% \centering
+% \captionof{table}{Performance in OOD task}
+% \label{tab:ood}
+% \scalebox{0.85}{\begin{tabular}{lcc}
+% \toprule
+% \multirow{2}{*}{\textbf{Model}}  & \multicolumn{2}{c}{\textbf{GPQA-Diamond}}   \\
+% \cmidrule(lr){2-3}
+%  & \textbf{Acc↑} & \textbf{Avg-Tokens↓}  \\
+% \midrule
+% % \rowcolor[HTML]{E8E8E8}
+% % \multicolumn{7}{c}{\textbf{Baseline}} \\
+% % \midrule
+% \multirow{1}{*}{DeepSaleR}
+%       &33.84&4762 \\
+% % \midrule
+% % \rowcolor[HTML]{E8E8E8}
+% % \multicolumn{7}{c}{\textbf{Other Methods}} \\
+% % \midrule
+%          \multirow{1}{*}{L1-Max}
+%      &33.33&1227  \\
+
+% {AutoThink}
+%     &34.41&3787 \\
+
+% % \midrule
+% % \rowcolor[HTML]{E8E8E8}
+% % \multicolumn{7}{c}{\textbf{Ours}} \\
+% % \midrule
+% \multirow{1}{*}{H1}
+%   &\textbf{34.72}&2101\\
+% \bottomrule
+% \end{tabular}}
+% \end{minipage}
+% \end{figure}
+
+
