@@ -1,8 +1,10 @@
 <div align="center">
-# Hierarchical Budget Policy Optimization
 
-**A Reinforcement Learning Framework for Adaptive Reasoning Efficiency**
+<title level="1">Hierarchical Budget Policy Optimization</title>
 
+  <center>
+    <subtitle>A Reinforcement Learning Framework for Adaptive Reasoning Efficiency</subtitle>
+    
 [![Paper](https://img.shields.io/badge/arXiv-2507.15844-b31b1b.svg)](http://arxiv.org/abs/2507.15844)
 [![Discussion](https://img.shields.io/badge/alphaXiv-Discussion-blue)](https://www.alphaxiv.org/abs/2507.15844)
 [![GitHub](https://img.shields.io/badge/GitHub-Repository-black)](https://github.com/zju-real/HBPO)
