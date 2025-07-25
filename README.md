@@ -139,10 +139,12 @@ Piecewise reward structure balancing exploration and efficiency:
 
 ```python
 def hierarchical_reward(correctness, length, budget):
-    if correctness and length <= budget:
-        return min(exploration_reward(length), budget_reward(budget))
-    else:
+    if not correctness:
         return 0
+    elif length <= budget:
+        return budget_reward(budget)
+    else:
+        return exploration_reward(length)
 ```
 
 ### Policy Optimization
