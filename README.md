@@ -55,7 +55,7 @@ HBPO introduces a hierarchical training framework with three core components:
 | HBPO | **87.6** | **86.2** | **50.0** | **31.1** | **63.7** |
 | **Token Usage** |
 | Baseline | 1,684 | 2,938 | 5,330 | 9,023 | 4,744 |
-| HBPO | **790** | **1,818** | **5,330** | **9,023** | **4,744** |
+| HBPO | **790** | **1,818** | **2,861** | **3,988** | **2,364** |
 
 ### Comparative Analysis
 
