@@ -16,7 +16,6 @@ Modern reasoning models suffer from computational inefficiency, generating unnec
 
 **Hierarchical Budget Policy Optimization (HBPO)** solves this fundamental challenge by teaching models to adapt their reasoning depth to problem complexity. Through structured exploration across multiple token budgets, HBPO enables models to automatically allocate computational resources—using concise reasoning for simple problems and extended chains for complex tasks.
 
-**Key Achievement**: 60.6% token reduction with 3.14% accuracy improvement across mathematical reasoning benchmarks.
 
 ## Problem Statement
 
