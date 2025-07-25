@@ -1,9 +1,9 @@
 <div align="center">
 
-<title level="1">Hierarchical Budget Policy Optimization</title>
+<h1>Hierarchical Budget Policy Optimization</h1>
 
-  <center>
-    <subtitle>A Reinforcement Learning Framework for Adaptive Reasoning Efficiency</subtitle>
+ 
+<h3>A Reinforcement Learning Framework for Adaptive Reasoning Efficiency</h3>
     
 [![Paper](https://img.shields.io/badge/arXiv-2507.15844-b31b1b.svg)](http://arxiv.org/abs/2507.15844)
 [![Discussion](https://img.shields.io/badge/alphaXiv-Discussion-blue)](https://www.alphaxiv.org/abs/2507.15844)
