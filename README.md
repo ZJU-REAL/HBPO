@@ -51,29 +51,28 @@ HBPO introduces a hierarchical training framework with three core components:
 | Method | GSM8K | MATH500 | Olympiad | AIME25 | Average |
 |--------|-------|---------|----------|---------|---------|
 | **Accuracy (%)** |
-| Baseline | 82.3 | 81.6 | 42.3 | 18.9 | 56.3 |
-| HBPO | **85.3** | **81.0** | **45.2** | **31.1** | **59.4** |
+| Baseline | 86.1 | 87.0 | 51.6 | 30.0 | 63.7 |
+| HBPO | **87.6** | **86.2** | **50.0** | **31.1** | **63.7** |
 | **Token Usage** |
-| Baseline | 1,111 | 4,696 | 10,225 | 15,651 | 7,921 |
-| HBPO | **408** | **1,948** | **4,403** | **4,717** | **3,120** |
+| Baseline | 1,684 | 2,938 | 5,330 | 9,023 | 4,744 |
+| HBPO | **790** | **1,818** | **5,330** | **9,023** | **4,744** |
 
 ### Comparative Analysis
 
 | Method | Strategy | Avg Accuracy | Avg Tokens | Trade-off |
 |--------|----------|--------------|------------|-----------|
-| TLMRE | Length penalty | 49.5% | 4,162 | -6.8% accuracy |
-| AdaptThink | Binary selection | 56.6% | 2,838 | Same accuracy, fewer tokens |
-| L1-Max | Explicit control | 55.6% | 3,142 | -0.7% accuracy |
-| **HBPO** | **Hierarchical exploration** | **59.4%** | **3,120** | **+3.14% accuracy, -60.6% tokens** |
+| AutoThink | Binary selection | 63.2 | 4,744 | -0.7% accuracy |
+| L1-Max | Explicit control | 60.4% | 2,547 | -3.3% accuracy |
+| **HBPO** | **Hierarchical exploration** | **63.7%** | **2,364** | **same accuracy, -50.2% tokens** |
 
 ### Adaptive Reasoning Behavior
 
 HBPO demonstrates genuine adaptability in token allocation:
 
-- **GSM8K (Basic Math)**: 408 tokens on average
-- **MATH500 (Intermediate)**: 1,948 tokens on average  
-- **Olympiad (Advanced)**: 4,403 tokens on average
-- **AIME25 (Competition)**: 4,717 tokens on average
+- **GSM8K (Basic Math)**: 790 tokens on average
+- **MATH500 (Intermediate)**: 1,818 tokens on average  
+- **Olympiad (Advanced)**: 2,861 tokens on average
+- **AIME25 (Competition)**: 3,988 tokens on average
 
 Unlike existing methods that maintain uniform token usage, HBPO naturally scales computational effort with problem complexity.
 
@@ -139,8 +138,6 @@ Piecewise reward structure balancing exploration and efficiency:
 def hierarchical_reward(correctness, length, budget):
     if correctness and length <= budget:
         return min(exploration_reward(length), budget_reward(budget))
-    elif correctness:
-        return apply_deviation_penalty(length, budget)
     else:
         return 0
 ```
@@ -156,13 +153,14 @@ Advantage computation incorporates both intra-subgroup and inter-subgroup compar
 
 ```
 HBPO/
-├── verl/                    # Core framework
-│   ├── trainer/            # Training algorithms
-│   ├── workers/            # Distributed components  
-│   └── utils/              # Utilities
-├── examples/               # Training scripts
+├── verl/                  # Core framework
+│   ├── trainer/           # Training algorithms
+│   ├── workers/           # Distributed components  
+│   └── utils/             # Utilities
+├── examples/              # Training scripts
 │   ├── grpo_trainer/      # HBPO implementation
-│   └── data_preprocess/   # Data preparation
+│   └── data_preprocess/   # Data preparation  
+├── rllm/                  # reward function design   
 ├── tests/                 # Test suites
 ├── docs/                  # Documentation
 └── figures/               # Paper figures
