@@ -1,13 +1,11 @@
 <div align="center">
 
 <h1>Hierarchical Budget Policy Optimization</h1>
-
  
 <h3>A Reinforcement Learning Framework for Adaptive Reasoning Efficiency</h3>
-    
-[![Paper](https://img.shields.io/badge/arXiv-2507.15844-b31b1b.svg)](http://arxiv.org/abs/2507.15844)
-[![Discussion](https://img.shields.io/badge/alphaXiv-Discussion-blue)](https://www.alphaxiv.org/abs/2507.15844)
-[![GitHub](https://img.shields.io/badge/GitHub-Repository-black)](https://github.com/zju-real/HBPO)
+
+[![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2507.15844) [![alphaXiv](https://img.shields.io/badge/discussion-A42C25?style=for-the-badge&logo=arxiv&logoColor=white&color=blue)](https://www.alphaxiv.org/abs/2507.15844) [![Github](https://img.shields.io/badge/HBPO-000000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/ZJU-REAL/HBPO)
+
 </div>
 
 ## Abstract
